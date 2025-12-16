@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RFID Label OCR</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #111825;
+      --panel2: #0e1622;
+      --text: #f5f7fa;
+      --muted: #9aa4b2;
+      --accent: #2d8cff;
+      --danger: #ff4d4d;
+      --ok: #22c55e;
+      --border: rgba(255, 255, 255, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden; /* fixed layout, no page scroll */
+    }
+
+    .app {
+      height: 100vh;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .topbar {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .brand {
+      font-weight: 800;
+      letter-spacing: 0.2px;
+      white-space: nowrap;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      padding: 4px;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+
+    .tab-btn {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+
+    .tab-btn.active {
+      background: rgba(45, 140, 255, 0.18);
+      color: var(--text);
+    }
+
+    .conn {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--danger);
+    }
+
+    .dot.ok { background: var(--ok); }
+
+    .content {
+      flex: 1 1 auto;
+      min-height: 0;
+      background: var(--panel2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      overflow: hidden;
+    }
+
+    .tab-panel {
+      height: 100%;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 0;
+    }
+
+    .tab-panel.active {
+      display: flex;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px;
+      min-height: 0;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    input[type="text"] {
+      flex: 1 1 auto;
+      min-width: 160px;
+      padding: 12px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      outline: none;
+      font-size: 14px;
+    }
+
+    button.primary {
+      border: 0;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--accent);
+      color: white;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button.primary:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    button.secondary {
+      border: 1px solid var(--border);
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button.secondary.on {
+      border-color: rgba(34, 197, 94, 0.6);
+      background: rgba(34, 197, 94, 0.18);
+    }
+
+    button.secondary:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status {
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .tag-grid {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-content: flex-start;
+      gap: 8px;
+      overflow: hidden; /* no internal scroll; we cap render count */
+    }
+
+    .chip {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+
+    .chip button {
+      border: 0;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      cursor: pointer;
+      line-height: 22px;
+      padding: 0;
+    }
+
+    .capture-layout {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 1fr 170px;
+      gap: 12px;
+    }
+
+    .capture-top {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 12px;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 6px 10px;
+      font-size: 13px;
+    }
+
+    .kv .k { color: var(--muted); }
+    .kv .v {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .number {
+      margin-top: 10px;
+      text-align: center;
+      padding: 14px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.22);
+      font-size: clamp(40px, 5vw, 64px);
+      font-weight: 900;
+      letter-spacing: 4px;
+    }
+
+    .images {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .image-box {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 0;
+    }
+
+    .image-title {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .imgwrap {
+      flex: 1 1 auto;
+      min-height: 0;
+      border-radius: 12px;
+      border: 1px dashed var(--border);
+      background: rgba(0, 0, 0, 0.18);
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 8px 8px;
+      border-top: 1px solid var(--border);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 700;
+      border-top: 0;
+    }
+
+    @media (max-width: 920px) {
+      .capture-top { grid-template-columns: 1fr; }
+      .images { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+      .kv { grid-template-columns: 120px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">RFID Label OCR</div>
+
+      <nav class="tabs" aria-label="Tabs">
+        <button class="tab-btn active" data-tab="tags" type="button">Approved Tags</button>
+        <button class="tab-btn" data-tab="capture" type="button">RFID Capture</button>
+      </nav>
+
+      <div class="conn" id="conn">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-text">RFID: ...</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="tab-panel active" id="tab-tags">
+        <div class="panel">
+          <div class="row">
+            <input id="tag-input" type="text" placeholder="Enter EPC/UID (hex) ..." autocomplete="off" />
+            <button class="primary" id="add-tag-btn" type="button">Add Tag</button>
+            <button class="secondary on" id="listen-btn" type="button">Listening: ON</button>
+          </div>
+          <div class="status" id="tags-status"></div>
+          <div class="hint" id="tags-meta">Approved tags: 0</div>
+        </div>
+
+        <div class="panel" style="flex: 1 1 auto; min-height: 0;">
+          <div class="hint" style="margin-bottom: 10px;">Approved tag list (stored in <code>approved_tags.json</code>)</div>
+          <div class="tag-grid" id="tags"></div>
+        </div>
+      </section>
+
+      <section class="tab-panel" id="tab-capture">
+        <div class="capture-layout">
+          <div class="capture-top">
+            <div class="panel">
+              <div class="hint" id="approved-count">Approved tags: 0</div>
+              <div class="kv" style="margin-top: 10px;">
+                <div class="k">Last RFID tag</div><div class="v" id="last-tag">-</div>
+                <div class="k">Approved</div><div class="v" id="last-approved">-</div>
+                <div class="k">Queue</div><div class="v" id="queue-size">0</div>
+                <div class="k">Capture</div><div class="v" id="cap-state">idle</div>
+                <div class="k">For tag</div><div class="v" id="cap-tag">-</div>
+                <div class="k">Attempt</div><div class="v" id="cap-attempt">0</div>
+                <div class="k">Message</div><div class="v" id="cap-msg">-</div>
+              </div>
+
+              <div class="number" id="cap-number">-----</div>
+              <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
+            </div>
+
+            <div class="panel" style="min-height: 0;">
+              <div class="images">
+                <div class="image-box">
+                  <div class="image-title">Original (outline)</div>
+                  <div class="imgwrap"><img id="img-original" alt="Original frame" /></div>
+                </div>
+                <div class="image-box">
+                  <div class="image-title">Warped paper</div>
+                  <div class="imgwrap"><img id="img-paper" alt="Warped paper" /></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="hint" style="margin-bottom: 8px;">Recent events</div>
+            <table>
+              <thead>
+                <tr>
+                  <th style="width: 90px;">Type</th>
+                  <th style="width: 120px;">Time (UTC)</th>
+                  <th>Tag / Info</th>
+                </tr>
+              </thead>
+              <tbody id="events"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
+    const tabPanels = {
+      tags: document.getElementById("tab-tags"),
+      capture: document.getElementById("tab-capture"),
+    };
+
+    const connDot = document.getElementById("conn-dot");
+    const connText = document.getElementById("conn-text");
+
+    const tagInput = document.getElementById("tag-input");
+    const addTagBtn = document.getElementById("add-tag-btn");
+    const listenBtn = document.getElementById("listen-btn");
+    const tagsStatus = document.getElementById("tags-status");
+    const tagsMeta = document.getElementById("tags-meta");
+    const tagsContainer = document.getElementById("tags");
+
+    const approvedCount = document.getElementById("approved-count");
+    const lastTag = document.getElementById("last-tag");
+    const lastApproved = document.getElementById("last-approved");
+    const queueSize = document.getElementById("queue-size");
+    const capState = document.getElementById("cap-state");
+    const capTag = document.getElementById("cap-tag");
+    const capAttempt = document.getElementById("cap-attempt");
+    const capMsg = document.getElementById("cap-msg");
+    const capNumber = document.getElementById("cap-number");
+    const capSub = document.getElementById("cap-sub");
+    const imgOriginal = document.getElementById("img-original");
+    const imgPaper = document.getElementById("img-paper");
+    const eventsBody = document.getElementById("events");
+
+    let activeTab = "tags";
+    let pollInFlight = false;
+    let listenEnabled = true;
+    let lastScannedTime = Date.now() / 1000;
+
+    function setActiveTab(name) {
+      activeTab = name;
+      tabButtons.forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+      Object.entries(tabPanels).forEach(([key, el]) => el.classList.toggle("active", key === name));
+      if (name !== "tags") setListening(false);
+    }
+
+    tabButtons.forEach((btn) => {
+      btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
+    });
+
+    function setListening(enabled) {
+      listenEnabled = !!enabled;
+      listenBtn.classList.toggle("on", listenEnabled);
+      listenBtn.textContent = listenEnabled ? "Listening: ON" : "Listening: OFF";
+      lastScannedTime = listenEnabled ? Date.now() / 1000 : 0;
+      if (listenEnabled) {
+        tagsStatus.textContent = "Listening... present a tag to the reader.";
+      }
+    }
+
+    listenBtn.addEventListener("click", () => {
+      setListening(!listenEnabled);
+    });
+
+    async function fetchJson(url, options) {
+      const resp = await fetch(url, options);
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        const msg = data && data.message ? data.message : resp.statusText;
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function renderTags(tags) {
+      const MAX_RENDER = 50;
+      const shown = tags.slice(0, MAX_RENDER);
+      tagsContainer.innerHTML = "";
+
+      for (const tag of shown) {
+        const chip = document.createElement("div");
+        chip.className = "chip";
+
+        const text = document.createElement("span");
+        text.textContent = tag;
+
+        const del = document.createElement("button");
+        del.type = "button";
+        del.textContent = "x";
+        del.title = "Remove";
+        del.addEventListener("click", async () => {
+          try {
+            await fetchJson("/api/tags/" + encodeURIComponent(tag), { method: "DELETE" });
+            await refreshTags();
+          } catch (e) {
+            tagsStatus.textContent = String(e.message || e);
+          }
+        });
+
+        chip.appendChild(text);
+        chip.appendChild(del);
+        tagsContainer.appendChild(chip);
+      }
+
+      const extra = tags.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${tags.length})` : "";
+      tagsMeta.textContent = `Approved tags: ${tags.length}${extra}`;
+    }
+
+    async function refreshTags() {
+      try {
+        const data = await fetchJson("/api/tags");
+        renderTags(data.tags || []);
+      } catch (e) {
+        tagsStatus.textContent = String(e.message || e);
+      }
+    }
+
+    async function addTag() {
+      const tag = tagInput.value.trim();
+      if (!tag) return;
+      addTagBtn.disabled = true;
+      tagsStatus.textContent = "";
+      try {
+        await fetchJson("/api/tags", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tag }),
+        });
+        tagInput.value = "";
+        await refreshTags();
+      } catch (e) {
+        tagsStatus.textContent = String(e.message || e);
+      } finally {
+        addTagBtn.disabled = false;
+      }
+    }
+
+    addTagBtn.addEventListener("click", addTag);
+    tagInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addTag();
+    });
+
+    function setConn(connected, enabled, msg) {
+      connDot.classList.toggle("ok", !!connected);
+      connText.textContent = enabled ? msg : "RFID: disabled (set rfid.host in config.json)";
+    }
+
+    function renderEvents(events) {
+      const rows = (events || []).slice(-6).reverse();
+      eventsBody.innerHTML = "";
+      for (const ev of rows) {
+        const tr = document.createElement("tr");
+        const tdType = document.createElement("td");
+        const tdTime = document.createElement("td");
+        const tdInfo = document.createElement("td");
+
+        tdType.textContent = ev.type || "-";
+        tdTime.textContent = (ev.time_iso || "").replace("T", " ").replace("Z", "");
+
+        if (ev.type === "rfid") {
+          tdInfo.textContent = `${ev.tag || ""}${ev.approved ? " (approved)" : " (not approved)"}`;
+        } else if (ev.type === "number") {
+          tdInfo.textContent = `${ev.tag || ""} -> ${ev.number || ""} (attempt ${ev.attempt || 0})`;
+        } else if (ev.type === "timeout") {
+          tdInfo.textContent = `${ev.tag || ""} (timeout, attempt ${ev.attempt || 0})`;
+        } else {
+          tdInfo.textContent = ev.tag || "";
+        }
+
+        tr.appendChild(tdType);
+        tr.appendChild(tdTime);
+        tr.appendChild(tdInfo);
+        eventsBody.appendChild(tr);
+      }
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = '<td colspan="3" style="color: var(--muted); border-top: 0;">No events yet.</td>';
+        eventsBody.appendChild(tr);
+      }
+    }
+
+    async function pollStatus() {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const includeImages = activeTab === "capture";
+        const data = await fetchJson("/api/status?include_images=" + (includeImages ? "1" : "0"));
+
+        const r = data.rfid || {};
+        const c = data.capture || {};
+
+        approvedCount.textContent = `Approved tags: ${data.approved_tags_count || 0}`;
+
+        if (!r.enabled) {
+          setConn(false, false, "");
+          listenBtn.disabled = true;
+          if (listenEnabled) setListening(false);
+        } else if (r.connected) {
+          setConn(true, true, `RFID: connected (${r.host}:${r.port})`);
+          listenBtn.disabled = false;
+        } else {
+          setConn(false, true, `RFID: disconnected (${r.host}:${r.port})`);
+          listenBtn.disabled = false;
+        }
+
+        lastTag.textContent = r.last_tag || "-";
+        lastApproved.textContent = r.last_tag ? (r.last_tag_approved ? "YES" : "NO") : "-";
+        queueSize.textContent = String(r.queue_size ?? 0);
+
+        capState.textContent = c.state || "idle";
+        capTag.textContent = c.tag || "-";
+        capAttempt.textContent = String(c.attempt ?? 0);
+        capMsg.textContent = c.message || "-";
+        capNumber.textContent = c.number ? c.number : "-----";
+
+        if (c.state === "running") capSub.textContent = "Capturing until 5 digits...";
+        else if (c.state === "success") capSub.textContent = "Done.";
+        else if (c.state === "failed") capSub.textContent = "Failed.";
+        else capSub.textContent = "Waiting for approved RFID tag...";
+
+        if (includeImages) {
+          imgOriginal.src = c.original_b64 ? "data:image/jpeg;base64," + c.original_b64 : "";
+          imgPaper.src = c.paper_b64 ? "data:image/jpeg;base64," + c.paper_b64 : "";
+        }
+
+        renderEvents(data.events || []);
+
+        if (activeTab === "tags" && listenEnabled && r.enabled) {
+          const tag = (r.last_tag || "").trim();
+          const tagTime = Number(r.last_tag_time || 0);
+          const tagApproved = !!r.last_tag_approved;
+
+          if (tag && tagTime && tagTime > lastScannedTime) {
+            lastScannedTime = tagTime;
+            tagInput.value = tag;
+            tagsStatus.textContent = tagApproved ? `Scanned: ${tag} (already approved)` : `Scanned: ${tag}`;
+
+            if (!tagApproved) {
+              try {
+                await fetchJson("/api/tags", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ tag }),
+                });
+                tagsStatus.textContent = `Added: ${tag}`;
+                await refreshTags();
+              } catch (e) {
+                tagsStatus.textContent = `Add failed: ${String(e.message || e)}`;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        connDot.classList.remove("ok");
+        connText.textContent = "Server: not reachable";
+        listenBtn.disabled = true;
+      } finally {
+        pollInFlight = false;
+      }
+    }
+
+    setListening(true);
+    refreshTags();
+    pollStatus();
+    setInterval(pollStatus, 1000);
+  </script>
+</body>
+</html>

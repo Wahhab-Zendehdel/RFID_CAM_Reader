@@ -1,0 +1,33 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.env
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*.swo
+Thumbs.db
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Runtime data
+approved_tags.json
+*.log
+*.tmp
+
+# Large model/weight files
+trocr-large-printed/
+*.bin
+*.safetensors

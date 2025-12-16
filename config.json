@@ -1,0 +1,21 @@
+{
+  "camera": {
+    "host": "192.168.1.111",
+    "port": 554,
+    "username": "user1",
+    "password": "Admin123456",
+    "path": "/live/0/main",
+    "rtsp_url": ""
+  },
+  "rfid": {
+    "host": "192.168.1.2",
+    "port": 6000,
+    "reconnect_seconds": 2.0,
+    "debounce_seconds": 1.0
+  },
+  "capture": {
+    "retry_interval_seconds": 0.4,
+    "timeout_seconds": 30.0,
+    "target_digits": 5
+  }
+}
