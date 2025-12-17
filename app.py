@@ -167,6 +167,11 @@ RFID_RECONNECT_SECONDS = _env_float("RFID_RECONNECT_SECONDS") or float(rfid_cfg.
 RFID_DEBOUNCE_SECONDS = _env_float("RFID_DEBOUNCE_SECONDS") or float(rfid_cfg.get("debounce_seconds") or 1.0)
 RFID_QUEUE_MAXSIZE = int(_env_int("RFID_QUEUE_MAXSIZE") or 50)
 TAG_COOLDOWN_SECONDS = float(os.environ.get("TAG_COOLDOWN_SECONDS", "3.0"))
+TAG_SUBMIT_COOLDOWN_SECONDS = float(os.environ.get("TAG_SUBMIT_COOLDOWN_SECONDS", "300.0"))  # 5 minutes after submit
+
+# Captured data persistence
+CAPTURE_OUTPUT_DIR = BASE_DIR / "submissions"
+CAPTURE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Capture loop tuning (until a 5-digit number is found)
 CAPTURE_RETRY_INTERVAL_SECONDS = _env_float("CAPTURE_RETRY_INTERVAL_SECONDS") or float(capture_cfg.get("retry_interval_seconds") or 0.4)
@@ -261,6 +266,7 @@ def _utc_iso(ts: float) -> str:
 state_lock = threading.Lock()
 rfid_event_queue: "queue.Queue[str]" = queue.Queue(maxsize=RFID_QUEUE_MAXSIZE)
 rfid_last_seen_by_tag = {}
+tag_submit_cooldowns = {}
 
 event_log = []
 EVENT_LOG_MAX = 50
@@ -277,7 +283,7 @@ rfid_status = {
 }
 
 capture_status = {
-    "state": "idle",  # idle | running | success | failed
+    "state": "idle",  # idle | running | awaiting_submit | submitted | failed
     "tag": "",
     "started_time": None,
     "attempt": 0,
@@ -287,6 +293,10 @@ capture_status = {
     "number_time": None,
     "original_b64": None,
     "paper_b64": None,
+    "awaiting_submit": False,
+    "submitted_path": "",
+    "submitted_time": None,
+    "submitted_prefix": "",
 }
 
 
@@ -465,6 +475,18 @@ def _append_event(event: dict) -> None:
             del event_log[:-EVENT_LOG_MAX]
 
 
+def _clear_rfid_queue() -> int:
+    """Drain the RFID event queue (used when waiting for manual submit)."""
+    cleared = 0
+    try:
+        while True:
+            rfid_event_queue.get_nowait()
+            cleared += 1
+    except queue.Empty:
+        pass
+    return cleared
+
+
 def _purge_tag_from_queue(tag: str) -> None:
     """Remove all queued occurrences of a tag to avoid flooding."""
     try:
@@ -490,15 +512,17 @@ def _handle_rfid_tag(raw_tag: str, source: str) -> None:
     now = time.time()
     approved = _is_tag_approved(tag)
 
+    debounced = False
+    pending_submit = False
+    cooldown_until = 0.0
+
     # If we recently processed this tag, skip re-queuing to keep last images/number visible
     with state_lock:
         last_num_time = capture_status.get("number_time") or capture_status.get("started_time") or 0
-        last_tag_active = capture_status.get("tag") == tag and capture_status.get("state") in {"running", "success"}
-        if last_tag_active and TAG_COOLDOWN_SECONDS > 0 and (now - last_num_time) < TAG_COOLDOWN_SECONDS:
-            return
+        last_tag_active = capture_status.get("tag") == tag and capture_status.get("state") in {"running", "success", "awaiting_submit", "submitted"}
+        pending_submit = bool(capture_status.get("awaiting_submit"))
+        cooldown_until = float(tag_submit_cooldowns.get(tag) or 0.0)
 
-    debounced = False
-    with state_lock:
         rfid_status["last_tag"] = tag
         rfid_status["last_tag_time"] = now
         rfid_status["last_tag_source"] = source
@@ -508,6 +532,34 @@ def _handle_rfid_tag(raw_tag: str, source: str) -> None:
             debounced = True
         else:
             rfid_last_seen_by_tag[tag] = now
+
+    if pending_submit:
+        _append_event(
+            {
+                "type": "blocked",
+                "time": now,
+                "time_iso": _utc_iso(now),
+                "tag": tag,
+                "reason": "awaiting_submit",
+            }
+        )
+        return
+
+    if cooldown_until and now < cooldown_until:
+        _append_event(
+            {
+                "type": "cooldown",
+                "time": now,
+                "time_iso": _utc_iso(now),
+                "tag": tag,
+                "cooldown_until": cooldown_until,
+                "cooldown_until_iso": _utc_iso(cooldown_until),
+            }
+        )
+        return
+
+    if last_tag_active and TAG_COOLDOWN_SECONDS > 0 and (now - last_num_time) < TAG_COOLDOWN_SECONDS:
+        return
 
     if debounced:
         return
@@ -524,19 +576,7 @@ def _handle_rfid_tag(raw_tag: str, source: str) -> None:
     )
 
     if not approved:
-        added, msg = _approve_tag(tag)
-        approved = added or _is_tag_approved(tag)
-        _append_event(
-            {
-                "type": "auto_approve" if added else "approve_skip",
-                "time": now,
-                "time_iso": _utc_iso(now),
-                "tag": tag,
-                "message": msg,
-            }
-        )
-        if not approved:
-            return
+        return
 
     # Avoid flooding the queue with the same tag if it's already running or queued
     with state_lock:
@@ -867,6 +907,59 @@ def img_to_base64_jpeg(img_bgr: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def _safe_component(text: str, fallback: str = "unknown") -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", (text or "").strip())
+    return cleaned or fallback
+
+
+def _save_capture_to_disk(capture: dict) -> dict:
+    """
+    Persist captured data to disk: JSON + images.
+    Returns a summary dict with paths and timestamps.
+    """
+    ts = time.time()
+    ts_label = datetime.utcfromtimestamp(ts).strftime("%Y%m%d_%H%M%S")
+
+    tag = _safe_component(capture.get("tag") or "unknown", "tag")
+    number = _safe_component(capture.get("number") or "-----", "number")
+    attempt = int(capture.get("attempt") or 0)
+
+    prefix = f"{ts_label}_TAG-{tag}_NUM-{number}_ATT-{attempt:02d}"
+    json_path = CAPTURE_OUTPUT_DIR / f"{prefix}.json"
+    orig_path = CAPTURE_OUTPUT_DIR / f"{prefix}_original.jpg"
+    paper_path = CAPTURE_OUTPUT_DIR / f"{prefix}_paper.jpg"
+
+    meta = {
+        "tag": capture.get("tag") or "",
+        "number": capture.get("number") or "",
+        "raw_text": capture.get("raw_text") or "",
+        "attempt": attempt,
+        "message": capture.get("message") or "",
+        "timestamp": ts,
+        "timestamp_iso": _utc_iso(ts),
+        "files": {},
+    }
+
+    if capture.get("original_b64"):
+        try:
+            orig_path.write_bytes(base64.b64decode(capture["original_b64"]))
+            meta["files"]["original"] = str(orig_path)
+        except Exception:
+            meta["files"]["original_error"] = "Failed to save original image"
+
+    if capture.get("paper_b64"):
+        try:
+            paper_path.write_bytes(base64.b64decode(capture["paper_b64"]))
+            meta["files"]["paper"] = str(paper_path)
+        except Exception:
+            meta["files"]["paper_error"] = "Failed to save paper image"
+
+    json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    meta["files"]["json"] = str(json_path)
+    meta["prefix"] = prefix
+    return meta
+
+
 # ============================
 # RFID-driven capture worker
 # ============================
@@ -915,6 +1008,10 @@ def _process_capture_for_tag(tag: str) -> None:
                     "raw_text": "",
                     "number": "",
                     "number_time": None,
+                    "awaiting_submit": False,
+                    "submitted_path": "",
+                    "submitted_time": None,
+                    "submitted_prefix": "",
                 }
             )
         return
@@ -933,6 +1030,10 @@ def _process_capture_for_tag(tag: str) -> None:
                 "number_time": None,
                 "original_b64": None,
                 "paper_b64": None,
+                "awaiting_submit": False,
+                "submitted_path": "",
+                "submitted_time": None,
+                "submitted_prefix": "",
             }
         )
 
@@ -965,11 +1066,16 @@ def _process_capture_for_tag(tag: str) -> None:
         if number:
             done = time.time()
             with state_lock:
-                capture_status["state"] = "success"
+                capture_status["state"] = "awaiting_submit"
                 capture_status["number"] = number
                 capture_status["number_time"] = done
-                capture_status["message"] = "OK"
+                capture_status["message"] = "Captured. Awaiting submit."
+                capture_status["awaiting_submit"] = True
+                capture_status["submitted_path"] = ""
+                capture_status["submitted_time"] = None
+                capture_status["submitted_prefix"] = ""
 
+            _clear_rfid_queue()
             _append_event(
                 {
                     "type": "number",
@@ -978,6 +1084,7 @@ def _process_capture_for_tag(tag: str) -> None:
                     "tag": tag,
                     "number": number,
                     "attempt": attempt,
+                    "awaiting_submit": True,
                 }
             )
             return
@@ -988,6 +1095,10 @@ def _process_capture_for_tag(tag: str) -> None:
                 capture_status["state"] = "failed"
                 capture_status["message"] = f"Timed out after {attempt} attempts"
                 capture_status["number_time"] = end
+                capture_status["awaiting_submit"] = False
+                capture_status["submitted_path"] = ""
+                capture_status["submitted_time"] = None
+                capture_status["submitted_prefix"] = ""
 
             _append_event(
                 {
@@ -1092,6 +1203,12 @@ def api_status():
     with approved_tags_lock:
         approved_count = len(approved_tags)
 
+    if capture.get("tag"):
+        cooldown_until = float(tag_submit_cooldowns.get(capture["tag"]) or 0.0)
+        if cooldown_until > 0:
+            capture["cooldown_until"] = cooldown_until
+            capture["cooldown_until_iso"] = _utc_iso(cooldown_until)
+
     if rfid.get("last_tag_time") is not None:
         rfid["last_tag_time_iso"] = _utc_iso(rfid["last_tag_time"])
 
@@ -1114,6 +1231,51 @@ def api_status():
             "events": events,
         }
     )
+
+
+@app.route("/api/capture/submit", methods=["POST"])
+def api_submit_capture():
+    with state_lock:
+        capture = dict(capture_status)
+
+    if not capture.get("awaiting_submit"):
+        return jsonify({"success": False, "message": "No capture awaiting submit"}), 400
+    if not capture.get("number"):
+        return jsonify({"success": False, "message": "No number captured"}), 400
+
+    try:
+        saved = _save_capture_to_disk(capture)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Failed to save: {e}"}), 500
+
+    cooldown_until = None
+    tag = capture.get("tag") or ""
+    if tag:
+        cooldown_until = time.time() + TAG_SUBMIT_COOLDOWN_SECONDS
+        tag_submit_cooldowns[tag] = cooldown_until
+        saved["cooldown_until"] = cooldown_until
+        saved["cooldown_until_iso"] = _utc_iso(cooldown_until)
+
+    with state_lock:
+        capture_status["awaiting_submit"] = False
+        capture_status["state"] = "submitted"
+        capture_status["message"] = "Submitted"
+        capture_status["submitted_path"] = saved["files"].get("json", "")
+        capture_status["submitted_time"] = saved.get("timestamp")
+        capture_status["submitted_prefix"] = saved.get("prefix", "")
+
+    _append_event(
+        {
+            "type": "submitted",
+            "time": saved.get("timestamp", time.time()),
+            "time_iso": saved.get("timestamp_iso", _utc_iso(time.time())),
+            "tag": tag,
+            "number": capture.get("number") or "",
+            "path": saved["files"].get("json", ""),
+        }
+    )
+
+    return jsonify({"success": True, "saved": saved})
 
 
 @app.route("/capture")

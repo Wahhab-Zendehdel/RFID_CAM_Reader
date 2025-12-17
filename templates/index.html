@@ -385,6 +385,10 @@
 
               <div class="number" id="cap-number">-----</div>
               <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
+              <div class="row" style="margin-top: 6px;">
+                <button class="primary" id="submit-btn" type="button" disabled>Submit capture</button>
+                <div class="hint" id="submit-status">Capture must succeed before submit.</div>
+              </div>
             </div>
 
             <div class="panel" style="min-height: 0;">
@@ -446,6 +450,8 @@
     const capMsg = document.getElementById("cap-msg");
     const capNumber = document.getElementById("cap-number");
     const capSub = document.getElementById("cap-sub");
+    const submitBtn = document.getElementById("submit-btn");
+    const submitStatus = document.getElementById("submit-status");
     const imgOriginal = document.getElementById("img-original");
     const imgPaper = document.getElementById("img-paper");
     const eventsBody = document.getElementById("events");
@@ -558,6 +564,27 @@
       if (e.key === "Enter") addTag();
     });
 
+    async function submitCapture() {
+      submitBtn.disabled = true;
+      submitStatus.textContent = "Submitting...";
+      try {
+        const resp = await fetchJson("/api/capture/submit", { method: "POST" });
+        const saved = resp.saved || {};
+        const files = saved.files || {};
+        const path = files.json || "";
+        const prefix = saved.prefix || "";
+        if (path) submitStatus.textContent = `Saved: ${path}`;
+        else if (prefix) submitStatus.textContent = `Submitted (${prefix})`;
+        else submitStatus.textContent = "Submitted.";
+      } catch (e) {
+        submitStatus.textContent = `Submit failed: ${String(e.message || e)}`;
+      } finally {
+        // button state is refreshed by pollStatus
+      }
+    }
+
+    submitBtn.addEventListener("click", submitCapture);
+
     function setConn(connected, enabled, msg) {
       connDot.classList.toggle("ok", !!connected);
       connText.textContent = enabled ? msg : "RFID: disabled (set rfid.host in config.json)";
@@ -581,6 +608,13 @@
           tdInfo.textContent = `${ev.tag || ""} -> ${ev.number || ""} (attempt ${ev.attempt || 0})`;
         } else if (ev.type === "timeout") {
           tdInfo.textContent = `${ev.tag || ""} (timeout, attempt ${ev.attempt || 0})`;
+        } else if (ev.type === "submitted") {
+          const loc = ev.path ? `saved ${ev.path}` : "submitted";
+          tdInfo.textContent = `${ev.tag || ""} -> ${ev.number || ""} ${loc}`;
+        } else if (ev.type === "cooldown") {
+          tdInfo.textContent = `${ev.tag || ""} cooling until ${ev.cooldown_until_iso || ""}`;
+        } else if (ev.type === "blocked") {
+          tdInfo.textContent = `${ev.tag || ""} blocked (${ev.reason || "awaiting submit"})`;
         } else {
           tdInfo.textContent = ev.tag || "";
         }
@@ -632,9 +666,32 @@
         capNumber.textContent = c.number ? c.number : "-----";
 
         if (c.state === "running") capSub.textContent = "Capturing until 5 digits...";
+        else if (c.state === "awaiting_submit") capSub.textContent = "Captured digits. Submit required.";
+        else if (c.state === "submitted") capSub.textContent = "Submitted. Ready for next tag.";
         else if (c.state === "success") capSub.textContent = "Done.";
         else if (c.state === "failed") capSub.textContent = "Failed.";
         else capSub.textContent = "Waiting for approved RFID tag...";
+
+        const awaitingSubmit = !!c.awaiting_submit;
+        submitBtn.disabled = !awaitingSubmit;
+
+        const savedPath = c.submitted_path || "";
+        const prefixHint = c.submitted_prefix ? `${c.submitted_prefix}.json` : "";
+        if (awaitingSubmit) {
+          submitStatus.textContent = "Ready to submit captured data.";
+        } else if (c.state === "submitted" && (savedPath || prefixHint)) {
+          submitStatus.textContent = `Saved: ${savedPath || prefixHint}`;
+        } else {
+          submitStatus.textContent = "Capture must succeed before submit.";
+        }
+
+        const cooldownUntil = Number(c.cooldown_until || 0);
+        if (cooldownUntil && data.server_time) {
+          const remaining = Math.max(0, Math.round(cooldownUntil - data.server_time));
+          const mm = Math.floor(remaining / 60);
+          const ss = String(remaining % 60).padStart(2, "0");
+          submitStatus.textContent += ` | Tag cooldown ${mm}:${ss}`;
+        }
 
         if (includeImages) {
           imgOriginal.src = c.original_b64 ? "data:image/jpeg;base64," + c.original_b64 : "";

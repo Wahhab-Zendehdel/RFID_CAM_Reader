@@ -23,6 +23,7 @@ dist/
 *.egg-info/
 
 # Runtime data
+submissions/
 approved_tags.json
 *.log
 *.tmp
