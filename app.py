@@ -33,6 +33,13 @@ DEFAULT_APP_CONFIG = {
         "path": "/live/0/main",
         "rtsp_url": "",
     },
+    "secondary_camera": {
+        "host": "192.168.1.173",
+        "port": 554,
+        "username": "user1",
+        "path": "/live/0/main",
+        "rtsp_url": "",
+    },
     "rfid": {
         "host": "192.168.1.2",
         "port": 6000,
@@ -141,6 +148,10 @@ def _build_rtsp_url(camera_cfg: dict) -> str:
 mask_path = _resolve_path(APP_CONFIG.get("mask_path", "Mask.png"))
 rtsp_url = _env_str("RTSP_URL") or _env_str("CAMERA_RTSP_URL") or _build_rtsp_url(APP_CONFIG.get("camera", {}))
 CAMERA_ENABLED = bool(rtsp_url)
+
+secondary_camera_cfg = APP_CONFIG.get("secondary_camera") or APP_CONFIG.get("camera2") or {}
+secondary_rtsp_url = _env_str("SECONDARY_RTSP_URL") or _build_rtsp_url(secondary_camera_cfg)
+SECONDARY_CAMERA_ENABLED = bool(secondary_rtsp_url)
 
 MIN_AREA = 3000               # min contour area in FULL resolution
 MAX_AREA_FRAC = 0.10          # max area as fraction of full frame
@@ -297,6 +308,8 @@ capture_status = {
     "submitted_path": "",
     "submitted_time": None,
     "submitted_prefix": "",
+    "secondary_b64": None,
+    "secondary_message": "",
 }
 
 
@@ -381,7 +394,24 @@ def is_rectangle_by_angles(pts, min_angle=70.0, max_angle=110.0):
 def load_ocr_model(model_id: str):
     image_processor = AutoImageProcessor.from_pretrained(model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
-    model = VisionEncoderDecoderModel.from_pretrained(model_id)
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+    has_accelerate = False
+    try:
+        import accelerate  # noqa: F401
+        has_accelerate = True
+    except Exception:
+        has_accelerate = False
+
+    load_kwargs = {"torch_dtype": torch_dtype}
+    if has_accelerate:
+        load_kwargs["low_cpu_mem_usage"] = True
+
+    try:
+        model = VisionEncoderDecoderModel.from_pretrained(model_id, **load_kwargs)
+    except TypeError:
+        # older transformers may not support low_cpu_mem_usage
+        model = VisionEncoderDecoderModel.from_pretrained(model_id, torch_dtype=torch_dtype)
     model.eval()
     return image_processor, tokenizer, model
 
@@ -764,6 +794,19 @@ latest_frame = None
 frame_lock = threading.Lock()
 reader_running = True
 
+secondary_camera_status = {
+    "enabled": SECONDARY_CAMERA_ENABLED,
+    "rtsp_url": secondary_rtsp_url,
+    "connected": False,
+    "last_error": "",
+    "last_frame_time": None,
+}
+
+cap_secondary = None
+secondary_frame = None
+secondary_frame_lock = threading.Lock()
+secondary_reader_running = True
+
 
 def _open_camera():
     global cap
@@ -843,6 +886,82 @@ reader_thread = threading.Thread(target=rtsp_reader, daemon=True)
 reader_thread.start()
 
 
+def _open_secondary_camera():
+    global cap_secondary
+
+    if not SECONDARY_CAMERA_ENABLED:
+        return False
+
+    try:
+        if cap_secondary is not None:
+            cap_secondary.release()
+    except Exception:
+        pass
+
+    cap_secondary = cv2.VideoCapture(secondary_rtsp_url)
+    try:
+        cap_secondary.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+    return bool(cap_secondary.isOpened())
+
+
+def secondary_rtsp_reader():
+    """
+    Continuously read frames from the secondary RTSP camera.
+    No detection; used for context capture after OCR success.
+    """
+    global secondary_frame, cap_secondary
+    while secondary_reader_running:
+        if not SECONDARY_CAMERA_ENABLED:
+            with state_lock:
+                secondary_camera_status["enabled"] = False
+                secondary_camera_status["connected"] = False
+                secondary_camera_status["last_error"] = "Secondary camera disabled (missing RTSP config)"
+            time.sleep(1.0)
+            continue
+
+        if cap_secondary is None or not cap_secondary.isOpened():
+            ok_open = _open_secondary_camera()
+            with state_lock:
+                secondary_camera_status["enabled"] = True
+                secondary_camera_status["rtsp_url"] = secondary_rtsp_url
+                secondary_camera_status["connected"] = bool(ok_open)
+                secondary_camera_status["last_error"] = "" if ok_open else f"Failed to open RTSP stream: {secondary_rtsp_url}"
+
+            if not ok_open:
+                time.sleep(1.5)
+                continue
+
+        try:
+            ok, frame = cap_secondary.read()
+        except Exception as e:
+            ok = False
+            frame = None
+            with state_lock:
+                secondary_camera_status["connected"] = False
+                secondary_camera_status["last_error"] = str(e)
+
+        if ok and frame is not None:
+            with secondary_frame_lock:
+                secondary_frame = frame
+            now = time.time()
+            with state_lock:
+                secondary_camera_status["connected"] = True
+                secondary_camera_status["last_error"] = ""
+                secondary_camera_status["last_frame_time"] = now
+        else:
+            with state_lock:
+                secondary_camera_status["connected"] = False
+                if not secondary_camera_status.get("last_error"):
+                    secondary_camera_status["last_error"] = "Failed to read frame"
+            time.sleep(0.2)
+
+
+secondary_reader_thread = threading.Thread(target=secondary_rtsp_reader, daemon=True)
+secondary_reader_thread.start()
+
+
 # ============================
 # Init OCR model
 # ============================
@@ -907,6 +1026,25 @@ def img_to_base64_jpeg(img_bgr: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def grab_secondary_snapshot():
+    """
+    Return (b64, message) for latest secondary camera frame.
+    Secondary cam is only used for contextual capture; no detection.
+    """
+    if not SECONDARY_CAMERA_ENABLED:
+        return None, "Secondary camera not configured"
+
+    with secondary_frame_lock:
+        if secondary_frame is None:
+            return None, "Secondary frame not available"
+        frame = secondary_frame.copy()
+
+    try:
+        return img_to_base64_jpeg(frame), "OK"
+    except Exception as e:
+        return None, f"Secondary encode failed: {e}"
+
+
 def _safe_component(text: str, fallback: str = "unknown") -> str:
     cleaned = re.sub(r"[^0-9A-Za-z_-]+", "_", (text or "").strip())
     return cleaned or fallback
@@ -928,6 +1066,7 @@ def _save_capture_to_disk(capture: dict) -> dict:
     json_path = CAPTURE_OUTPUT_DIR / f"{prefix}.json"
     orig_path = CAPTURE_OUTPUT_DIR / f"{prefix}_original.jpg"
     paper_path = CAPTURE_OUTPUT_DIR / f"{prefix}_paper.jpg"
+    secondary_path = CAPTURE_OUTPUT_DIR / f"{prefix}_secondary.jpg"
 
     meta = {
         "tag": capture.get("tag") or "",
@@ -935,6 +1074,7 @@ def _save_capture_to_disk(capture: dict) -> dict:
         "raw_text": capture.get("raw_text") or "",
         "attempt": attempt,
         "message": capture.get("message") or "",
+        "secondary_message": capture.get("secondary_message") or "",
         "timestamp": ts,
         "timestamp_iso": _utc_iso(ts),
         "files": {},
@@ -953,6 +1093,13 @@ def _save_capture_to_disk(capture: dict) -> dict:
             meta["files"]["paper"] = str(paper_path)
         except Exception:
             meta["files"]["paper_error"] = "Failed to save paper image"
+
+    if capture.get("secondary_b64"):
+        try:
+            secondary_path.write_bytes(base64.b64decode(capture["secondary_b64"]))
+            meta["files"]["secondary"] = str(secondary_path)
+        except Exception:
+            meta["files"]["secondary_error"] = "Failed to save secondary image"
 
     json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     meta["files"]["json"] = str(json_path)
@@ -1012,6 +1159,8 @@ def _process_capture_for_tag(tag: str) -> None:
                     "submitted_path": "",
                     "submitted_time": None,
                     "submitted_prefix": "",
+                    "secondary_b64": None,
+                    "secondary_message": "",
                 }
             )
         return
@@ -1034,6 +1183,8 @@ def _process_capture_for_tag(tag: str) -> None:
                 "submitted_path": "",
                 "submitted_time": None,
                 "submitted_prefix": "",
+                "secondary_b64": None,
+                "secondary_message": "",
             }
         )
 
@@ -1064,6 +1215,7 @@ def _process_capture_for_tag(tag: str) -> None:
             capture_status["paper_b64"] = paper_b64
 
         if number:
+            sec_b64, sec_msg = grab_secondary_snapshot()
             done = time.time()
             with state_lock:
                 capture_status["state"] = "awaiting_submit"
@@ -1074,6 +1226,8 @@ def _process_capture_for_tag(tag: str) -> None:
                 capture_status["submitted_path"] = ""
                 capture_status["submitted_time"] = None
                 capture_status["submitted_prefix"] = ""
+                capture_status["secondary_b64"] = sec_b64
+                capture_status["secondary_message"] = sec_msg or ""
 
             _clear_rfid_queue()
             _append_event(
@@ -1194,6 +1348,7 @@ def api_status():
     with state_lock:
         rfid = dict(rfid_status)
         capture = dict(capture_status)
+        secondary_cam = dict(secondary_camera_status)
         events = list(event_log[-10:])
         queue_size = rfid_event_queue.qsize()
 
@@ -1220,6 +1375,7 @@ def api_status():
     if not include_images:
         capture["original_b64"] = None
         capture["paper_b64"] = None
+        capture["secondary_b64"] = None
 
     return jsonify(
         {
@@ -1227,6 +1383,7 @@ def api_status():
             "server_time_iso": _utc_iso(now),
             "approved_tags_count": approved_count,
             "rfid": rfid,
+            "secondary_camera": secondary_cam,
             "capture": capture,
             "events": events,
         }
@@ -1327,12 +1484,17 @@ def capture():
 # ============================
 
 def cleanup():
-    global reader_running, rfid_running, capture_running
+    global reader_running, rfid_running, capture_running, secondary_reader_running
     reader_running = False
     rfid_running = False
     capture_running = False
+    secondary_reader_running = False
     try:
         reader_thread.join(timeout=1.0)
+    except Exception:
+        pass
+    try:
+        secondary_reader_thread.join(timeout=1.0)
     except Exception:
         pass
     if rfid_thread is not None:
@@ -1348,6 +1510,11 @@ def cleanup():
     try:
         if cap is not None:
             cap.release()
+    except Exception:
+        pass
+    try:
+        if cap_secondary is not None:
+            cap_secondary.release()
     except Exception:
         pass
 

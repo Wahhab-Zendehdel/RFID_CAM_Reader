@@ -270,7 +270,7 @@
     .images {
       min-height: 0;
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 12px;
     }
 
@@ -401,6 +401,10 @@
                   <div class="image-title">Warped paper</div>
                   <div class="imgwrap"><img id="img-paper" alt="Warped paper" /></div>
                 </div>
+                <div class="image-box">
+                  <div class="image-title">Secondary camera</div>
+                  <div class="imgwrap"><img id="img-secondary" alt="Secondary camera frame" /></div>
+                </div>
               </div>
             </div>
           </div>
@@ -454,6 +458,7 @@
     const submitStatus = document.getElementById("submit-status");
     const imgOriginal = document.getElementById("img-original");
     const imgPaper = document.getElementById("img-paper");
+    const imgSecondary = document.getElementById("img-secondary");
     const eventsBody = document.getElementById("events");
 
     let activeTab = "tags";
@@ -665,9 +670,10 @@
         capMsg.textContent = c.message || "-";
         capNumber.textContent = c.number ? c.number : "-----";
 
+        const secMsg = c.secondary_message || "";
         if (c.state === "running") capSub.textContent = "Capturing until 5 digits...";
-        else if (c.state === "awaiting_submit") capSub.textContent = "Captured digits. Submit required.";
-        else if (c.state === "submitted") capSub.textContent = "Submitted. Ready for next tag.";
+        else if (c.state === "awaiting_submit") capSub.textContent = "Captured digits. Submit required." + (secMsg ? ` Secondary: ${secMsg}` : "");
+        else if (c.state === "submitted") capSub.textContent = "Submitted. Ready for next tag." + (secMsg ? ` Secondary: ${secMsg}` : "");
         else if (c.state === "success") capSub.textContent = "Done.";
         else if (c.state === "failed") capSub.textContent = "Failed.";
         else capSub.textContent = "Waiting for approved RFID tag...";
@@ -696,6 +702,11 @@
         if (includeImages) {
           imgOriginal.src = c.original_b64 ? "data:image/jpeg;base64," + c.original_b64 : "";
           imgPaper.src = c.paper_b64 ? "data:image/jpeg;base64," + c.paper_b64 : "";
+          imgSecondary.src = c.secondary_b64 ? "data:image/jpeg;base64," + c.secondary_b64 : "";
+        } else {
+          imgOriginal.src = "";
+          imgPaper.src = "";
+          imgSecondary.src = "";
         }
 
         renderEvents(data.events || []);
