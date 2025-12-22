@@ -204,13 +204,55 @@
     .chip {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
       padding: 8px 10px;
       border-radius: 999px;
       border: 1px solid var(--border);
       background: rgba(255, 255, 255, 0.04);
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 12px;
+      position: relative;
+    }
+
+    .chip .label {
+      padding: 2px 6px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 11px;
+      color: var(--text);
+    }
+
+    .chip .label.missing {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+    }
+
+    .chip .tag-actions {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .chip .inline-input {
+      width: 70px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font-size: 12px;
+    }
+
+    .chip .chip-status {
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: -16px;
+      color: var(--danger);
+      font-size: 11px;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
     }
 
     .chip button {
@@ -266,6 +308,21 @@
       font-weight: 900;
       letter-spacing: 4px;
     }
+
+    .alert {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .alert.ok { border-color: rgba(34, 197, 94, 0.5); background: rgba(34, 197, 94, 0.14); }
+    .alert.warn { border-color: rgba(234, 179, 8, 0.5); background: rgba(234, 179, 8, 0.14); }
+    .alert.danger { border-color: rgba(239, 68, 68, 0.6); background: rgba(239, 68, 68, 0.16); }
+    .alert.muted { color: var(--muted); }
 
     .images {
       min-height: 0;
@@ -355,6 +412,7 @@
         <div class="panel">
           <div class="row">
             <input id="tag-input" type="text" placeholder="Enter EPC/UID (hex) ..." autocomplete="off" />
+            <input id="tag-label-input" type="text" placeholder="5-digit label (e.g., 12345)" maxlength="5" autocomplete="off" />
             <button class="primary" id="add-tag-btn" type="button">Add Tag</button>
             <button class="secondary" id="listen-btn" type="button">Listening: OFF</button>
           </div>
@@ -379,10 +437,16 @@
                 <div class="k">Queue</div><div class="v" id="queue-size">0</div>
                 <div class="k">Capture</div><div class="v" id="cap-state">idle</div>
                 <div class="k">For tag</div><div class="v" id="cap-tag">-</div>
-                <div class="k">Attempt</div><div class="v" id="cap-attempt">0</div>
+                <div class="k">Attempt</div><div class="v" id="cap-attempt">0 / -</div>
+                <div class="k">Attempt reset</div><div class="v" id="cap-attempt-reset">-</div>
+                <div class="k">Secondary mode</div><div class="v" id="cap-secondary-mode">-</div>
+                <div class="k">Expected</div><div class="v" id="cap-expected">-</div>
+                <div class="k">Observed</div><div class="v" id="cap-observed">-</div>
+                <div class="k">Match status</div><div class="v" id="cap-match">-</div>
                 <div class="k">Message</div><div class="v" id="cap-msg">-</div>
               </div>
 
+              <div class="alert muted" id="cap-banner" aria-live="polite">Waiting for approved RFID tag...</div>
               <div class="number" id="cap-number">-----</div>
               <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
               <div class="row" style="margin-top: 6px;">
@@ -394,15 +458,15 @@
             <div class="panel" style="min-height: 0;">
               <div class="images">
                 <div class="image-box">
-                  <div class="image-title">Original (outline)</div>
+                  <div class="image-title" id="title-original">Original (outline)</div>
                   <div class="imgwrap"><img id="img-original" alt="Original frame" /></div>
                 </div>
                 <div class="image-box">
-                  <div class="image-title">Warped paper</div>
+                  <div class="image-title" id="title-paper">Warped paper</div>
                   <div class="imgwrap"><img id="img-paper" alt="Warped paper" /></div>
                 </div>
                 <div class="image-box">
-                  <div class="image-title">Secondary camera</div>
+                  <div class="image-title" id="title-secondary">Secondary camera</div>
                   <div class="imgwrap"><img id="img-secondary" alt="Secondary camera frame" /></div>
                 </div>
               </div>
@@ -438,6 +502,7 @@
     const connText = document.getElementById("conn-text");
 
     const tagInput = document.getElementById("tag-input");
+    const tagLabelInput = document.getElementById("tag-label-input");
     const addTagBtn = document.getElementById("add-tag-btn");
     const listenBtn = document.getElementById("listen-btn");
     const tagsStatus = document.getElementById("tags-status");
@@ -451,14 +516,23 @@
     const capState = document.getElementById("cap-state");
     const capTag = document.getElementById("cap-tag");
     const capAttempt = document.getElementById("cap-attempt");
+    const capAttemptReset = document.getElementById("cap-attempt-reset");
+    const capSecondaryMode = document.getElementById("cap-secondary-mode");
+    const capExpected = document.getElementById("cap-expected");
+    const capObserved = document.getElementById("cap-observed");
+    const capMatch = document.getElementById("cap-match");
     const capMsg = document.getElementById("cap-msg");
     const capNumber = document.getElementById("cap-number");
+    const capBanner = document.getElementById("cap-banner");
     const capSub = document.getElementById("cap-sub");
     const submitBtn = document.getElementById("submit-btn");
     const submitStatus = document.getElementById("submit-status");
     const imgOriginal = document.getElementById("img-original");
     const imgPaper = document.getElementById("img-paper");
     const imgSecondary = document.getElementById("img-secondary");
+    const titleOriginal = document.getElementById("title-original");
+    const titlePaper = document.getElementById("title-paper");
+    const titleSecondary = document.getElementById("title-secondary");
     const eventsBody = document.getElementById("events");
 
     let activeTab = "tags";
@@ -501,22 +575,124 @@
       return data;
     }
 
-    function renderTags(tags) {
+    function extractTagEntries(data) {
+      const labelMaps = {};
+      if (data && typeof data === "object") {
+        Object.assign(labelMaps, data.tag_labels || {});
+        Object.assign(labelMaps, data.tag_to_label || {});
+      }
+
+      let tagsRaw = [];
+      if (Array.isArray(data)) {
+        tagsRaw = data;
+      } else if (Array.isArray(data?.tags)) {
+        tagsRaw = data.tags;
+      } else if (Array.isArray(data?.entries)) {
+        tagsRaw = data.entries;
+      } else if (Array.isArray((data || {}).tags?.tags)) {
+        tagsRaw = data.tags.tags;
+      } else if (labelMaps && Object.keys(labelMaps).length > 0) {
+        tagsRaw = Object.keys(labelMaps);
+      }
+
+      const entries = [];
+      for (const item of tagsRaw) {
+        if (typeof item === "string") {
+          entries.push({ tag: item, label: labelMaps[item] || "" });
+        } else if (item && typeof item === "object") {
+          const t = item.tag || item.id || item.tag_id;
+          if (!t) continue;
+          entries.push({ tag: t, label: item.label || labelMaps[t] || "" });
+        }
+      }
+
+      // ensure labels from map included even if tag list empty
+      for (const [t, lbl] of Object.entries(labelMaps)) {
+        const exists = entries.some((e) => e.tag === t);
+        if (!exists) entries.push({ tag: t, label: lbl });
+      }
+
+      const uniq = [];
+      const seen = new Set();
+      for (const e of entries) {
+        if (seen.has(e.tag)) continue;
+        seen.add(e.tag);
+        uniq.push(e);
+      }
+      return uniq;
+    }
+
+    function renderTags(resp) {
+      const entries = extractTagEntries(resp);
       const MAX_RENDER = 50;
-      const shown = tags.slice(0, MAX_RENDER);
+      const shown = entries.slice(0, MAX_RENDER);
       tagsContainer.innerHTML = "";
 
-      for (const tag of shown) {
+      for (const entry of shown) {
+        const tag = entry.tag;
+        const label = entry.label || "";
         const chip = document.createElement("div");
         chip.className = "chip";
 
         const text = document.createElement("span");
         text.textContent = tag;
+        chip.appendChild(text);
+
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "label" + (label ? "" : " missing");
+        labelSpan.textContent = label || "No label";
+        chip.appendChild(labelSpan);
+
+        const inlineInput = document.createElement("input");
+        inlineInput.className = "inline-input";
+        inlineInput.type = "text";
+        inlineInput.maxLength = 5;
+        inlineInput.placeholder = "12345";
+        inlineInput.value = label;
+
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.textContent = "💾";
+        saveBtn.title = "Save label";
 
         const del = document.createElement("button");
         del.type = "button";
         del.textContent = "x";
         del.title = "Remove";
+
+        const statusSpan = document.createElement("div");
+        statusSpan.className = "chip-status";
+        statusSpan.textContent = "";
+
+        async function saveLabel() {
+          const val = inlineInput.value.trim();
+          if (!/^\d{5}$/.test(val)) {
+            statusSpan.textContent = "Label must be 5 digits";
+            return;
+          }
+          statusSpan.textContent = "";
+          saveBtn.disabled = true;
+          inlineInput.disabled = true;
+          try {
+            await fetchJson(`/api/tags/${encodeURIComponent(tag)}/label`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ label: val }),
+            });
+            await refreshTags();
+          } catch (e) {
+            statusSpan.textContent = String(e.message || e);
+          } finally {
+            saveBtn.disabled = false;
+            inlineInput.disabled = false;
+          }
+        }
+
+        saveBtn.addEventListener("click", saveLabel);
+        inlineInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") saveLabel();
+        });
+
         del.addEventListener("click", async () => {
           try {
             await fetchJson("/api/tags/" + encodeURIComponent(tag), { method: "DELETE" });
@@ -526,19 +702,25 @@
           }
         });
 
-        chip.appendChild(text);
-        chip.appendChild(del);
+        const actions = document.createElement("div");
+        actions.className = "tag-actions";
+        actions.appendChild(inlineInput);
+        actions.appendChild(saveBtn);
+        actions.appendChild(del);
+
+        chip.appendChild(actions);
+        chip.appendChild(statusSpan);
         tagsContainer.appendChild(chip);
       }
 
-      const extra = tags.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${tags.length})` : "";
-      tagsMeta.textContent = `Approved tags: ${tags.length}${extra}`;
+      const extra = entries.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${entries.length})` : "";
+      tagsMeta.textContent = `Approved tags: ${entries.length}${extra}`;
     }
 
     async function refreshTags() {
       try {
         const data = await fetchJson("/api/tags");
-        renderTags(data.tags || []);
+        renderTags(data);
       } catch (e) {
         tagsStatus.textContent = String(e.message || e);
       }
@@ -546,16 +728,22 @@
 
     async function addTag() {
       const tag = tagInput.value.trim();
+      const label = tagLabelInput.value.trim();
       if (!tag) return;
+      if (label && !/^\d{5}$/.test(label)) {
+        tagsStatus.textContent = "Label must be exactly 5 digits.";
+        return;
+      }
       addTagBtn.disabled = true;
       tagsStatus.textContent = "";
       try {
         await fetchJson("/api/tags", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tag }),
+          body: JSON.stringify(label ? { tag, label } : { tag }),
         });
         tagInput.value = "";
+        tagLabelInput.value = "";
         await refreshTags();
       } catch (e) {
         tagsStatus.textContent = String(e.message || e);
@@ -566,6 +754,9 @@
 
     addTagBtn.addEventListener("click", addTag);
     tagInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addTag();
+    });
+    tagLabelInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") addTag();
     });
 
@@ -620,6 +811,17 @@
           tdInfo.textContent = `${ev.tag || ""} cooling until ${ev.cooldown_until_iso || ""}`;
         } else if (ev.type === "blocked") {
           tdInfo.textContent = `${ev.tag || ""} blocked (${ev.reason || "awaiting submit"})`;
+        } else if (ev.type === "mismatch") {
+          tdInfo.textContent = `⚠ ${ev.tag || ""} expected ${ev.expected_number || "-"} observed ${ev.observed_number || "-"} (att ${ev.attempt || 0})`;
+          tdType.style.color = "var(--danger)";
+          tdInfo.style.color = "var(--danger)";
+        } else if (ev.type === "missing_label") {
+          tdInfo.textContent = `⚠ ${ev.tag || ""} has no label (att ${ev.attempt || 0})`;
+          tdType.style.color = "var(--muted)";
+        } else if (ev.type === "ocr_failed") {
+          tdInfo.textContent = `${ev.tag || ""} OCR failed (att ${ev.attempt || 0})`;
+        } else if (ev.type === "no_paper") {
+          tdInfo.textContent = `${ev.tag || ""} no paper (att ${ev.attempt || 0})`;
         } else {
           tdInfo.textContent = ev.tag || "";
         }
@@ -666,25 +868,89 @@
 
         capState.textContent = c.state || "idle";
         capTag.textContent = c.tag || "-";
-        capAttempt.textContent = String(c.attempt ?? 0);
-        capMsg.textContent = c.message || "-";
-        capNumber.textContent = c.number ? c.number : "-----";
+        const attempt = Number(c.attempt ?? 0);
+        const maxAttempts = Number(c.max_attempts ?? 0) || "-";
+        capAttempt.textContent = `${attempt} / ${maxAttempts}`;
+        capAttemptReset.textContent = c.attempt_reset_mode || "-";
+        capSecondaryMode.textContent = c.secondary_snapshot_mode || "-";
 
+        const expected = c.expected_number || "";
+        const observed = c.observed_number || c.number || "";
+        capExpected.textContent = expected || "-";
+        capObserved.textContent = observed || "-";
+        capMsg.textContent = c.message || "-";
+        capNumber.textContent = observed ? observed : "-----";
+
+        let matchStatus = "-";
+        let bannerText = "Waiting for approved RFID tag...";
+        let bannerClass = "muted";
         const secMsg = c.secondary_message || "";
-        if (c.state === "running") capSub.textContent = "Capturing until 5 digits...";
-        else if (c.state === "awaiting_submit") capSub.textContent = "Captured digits. Submit required." + (secMsg ? ` Secondary: ${secMsg}` : "");
-        else if (c.state === "submitted") capSub.textContent = "Submitted. Ready for next tag." + (secMsg ? ` Secondary: ${secMsg}` : "");
-        else if (c.state === "success") capSub.textContent = "Done.";
-        else if (c.state === "failed") capSub.textContent = "Failed.";
+        const state = c.state || "idle";
+        const mismatch = !!c.mismatch;
+        const mismatchReason = c.mismatch_reason || "";
+        const mismatchMessage = c.mismatch_message || c.message || "";
+
+        if (state === "matched" || (state === "awaiting_submit" && !mismatch && expected && observed && expected === observed)) {
+          matchStatus = "MATCH";
+          bannerText = "MATCH — numbers align";
+          bannerClass = "ok";
+        } else if (state === "mismatch" || mismatch) {
+          matchStatus = "MISMATCH";
+          bannerText = mismatchMessage || (expected ? `MISMATCH — Expected ${expected} but OCR read ${observed || "-"}` : "MISMATCH");
+          bannerClass = "danger";
+        } else if (state === "missing_label") {
+          matchStatus = "MISSING LABEL";
+          bannerText = "MISSING LABEL — This tag has no assigned 5-digit label";
+          bannerClass = "warn";
+        } else if (state === "no_paper") {
+          matchStatus = "NO PAPER";
+          bannerText = "NO PAPER — Paper not detected in this frame";
+          bannerClass = "muted";
+        } else if (state === "ocr_failed") {
+          matchStatus = "OCR FAILED";
+          bannerText = "OCR FAILED — No 5-digit number found";
+          bannerClass = "warn";
+        } else if (state === "failed") {
+          matchStatus = "FAILED";
+          bannerText = mismatchMessage || "Capture failed";
+          bannerClass = "danger";
+        } else if (state === "awaiting_submit") {
+          matchStatus = "AWAITING SUBMIT";
+          bannerText = "Captured digits. Submit required.";
+          bannerClass = "ok";
+        } else if (state === "running") {
+          matchStatus = "CAPTURING";
+          bannerText = "Capturing...";
+          bannerClass = "muted";
+        } else if (state === "submitted") {
+          matchStatus = "SUBMITTED";
+          bannerText = "Submitted. Ready for next tag.";
+          bannerClass = "ok";
+        }
+
+        capMatch.textContent = matchStatus;
+        capBanner.textContent = bannerText + (secMsg ? ` Secondary: ${secMsg}` : "");
+        capBanner.className = `alert ${bannerClass}`;
+
+        if (state === "running") capSub.textContent = "Capturing single frame...";
+        else if (state === "awaiting_submit") capSub.textContent = "Captured digits. Submit required." + (secMsg ? ` Secondary: ${secMsg}` : "");
+        else if (state === "submitted") capSub.textContent = "Submitted. Ready for next tag." + (secMsg ? ` Secondary: ${secMsg}` : "");
+        else if (state === "success") capSub.textContent = "Done.";
+        else if (state === "failed" || state === "mismatch" || state === "missing_label" || state === "ocr_failed" || state === "no_paper") capSub.textContent = mismatchMessage || c.message || "Failed.";
         else capSub.textContent = "Waiting for approved RFID tag...";
 
         const awaitingSubmit = !!c.awaiting_submit;
-        submitBtn.disabled = !awaitingSubmit;
+        const backendCanSubmit = typeof c.can_submit === "boolean" ? c.can_submit : null;
+        const allowSubmitRule = awaitingSubmit && !mismatch && (!!expected || backendCanSubmit === true);
+        const submitAllowed = backendCanSubmit !== null ? backendCanSubmit : allowSubmitRule;
+        submitBtn.disabled = !submitAllowed;
 
         const savedPath = c.submitted_path || "";
         const prefixHint = c.submitted_prefix ? `${c.submitted_prefix}.json` : "";
-        if (awaitingSubmit) {
+        if (submitAllowed && awaitingSubmit) {
           submitStatus.textContent = "Ready to submit captured data.";
+        } else if (awaitingSubmit && !submitAllowed) {
+          submitStatus.textContent = mismatchMessage || "Submit blocked (resolve mismatch/missing label)";
         } else if (c.state === "submitted" && (savedPath || prefixHint)) {
           submitStatus.textContent = `Saved: ${savedPath || prefixHint}`;
         } else {
@@ -699,14 +965,24 @@
           submitStatus.textContent += ` | Tag cooldown ${mm}:${ss}`;
         }
 
+        const captureTimeIso = c.number_time_iso || c.started_time_iso || "";
+        const captureCaption = captureTimeIso ? `Captured at ${captureTimeIso}` : "";
+        const attemptCaption = attempt ? `Attempt ${attempt}` : "";
+
         if (includeImages) {
           imgOriginal.src = c.original_b64 ? "data:image/jpeg;base64," + c.original_b64 : "";
           imgPaper.src = c.paper_b64 ? "data:image/jpeg;base64," + c.paper_b64 : "";
           imgSecondary.src = c.secondary_b64 ? "data:image/jpeg;base64," + c.secondary_b64 : "";
+          titleOriginal.textContent = "Original" + (attemptCaption ? ` • ${attemptCaption}` : "");
+          titlePaper.textContent = "Warped paper" + (captureCaption ? ` • ${captureCaption}` : "");
+          titleSecondary.textContent = "Secondary camera" + (c.secondary_message ? ` • ${c.secondary_message}` : "");
         } else {
           imgOriginal.src = "";
           imgPaper.src = "";
           imgSecondary.src = "";
+          titleOriginal.textContent = "Original (outline)";
+          titlePaper.textContent = "Warped paper";
+          titleSecondary.textContent = "Secondary camera";
         }
 
         renderEvents(data.events || []);
