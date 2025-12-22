@@ -175,6 +175,22 @@
       background: rgba(34, 197, 94, 0.18);
     }
 
+    button.danger {
+      border: 1px solid rgba(239, 68, 68, 0.5);
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: rgba(239, 68, 68, 0.12);
+      color: #ff9b9b;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button.danger:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
     button.secondary:disabled {
       opacity: 0.55;
       cursor: default;
@@ -271,7 +287,7 @@
       flex: 1 1 auto;
       min-height: 0;
       display: grid;
-      grid-template-columns: minmax(260px, 0.9fr) minmax(320px, 1.1fr);
+      grid-template-columns: minmax(220px, 0.85fr) minmax(320px, 1.15fr);
       grid-template-rows: auto 1fr;
       gap: 12px;
     }
@@ -457,6 +473,7 @@
             <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
             <div class="row" style="margin-top: 6px;">
               <button class="primary" id="submit-btn" type="button" disabled>Submit capture</button>
+              <button class="danger" id="retry-btn" type="button" disabled>Try Again</button>
               <div class="hint" id="submit-status">Capture must succeed before submit.</div>
             </div>
           </div>
@@ -541,6 +558,7 @@
     const capBanner = document.getElementById("cap-banner");
     const capSub = document.getElementById("cap-sub");
     const submitBtn = document.getElementById("submit-btn");
+    const retryBtn = document.getElementById("retry-btn");
     const submitStatus = document.getElementById("submit-status");
     const imgOriginal = document.getElementById("img-original");
     const imgPaper = document.getElementById("img-paper");
@@ -557,6 +575,7 @@
     let lastListenedTag = "";
     let lastListenTs = 0;
     const LISTEN_DEBOUNCE_SECONDS = 1.0;
+    let lastCaptureStatus = {};
 
     function setActiveTab(name) {
       activeTab = name;
@@ -801,6 +820,29 @@
 
     submitBtn.addEventListener("click", submitCapture);
 
+    async function requestRetry() {
+      retryBtn.disabled = true;
+      submitBtn.disabled = true;
+      submitStatus.textContent = "Retry requested...";
+      const tag = (lastCaptureStatus.tag || "").trim();
+      if (!tag) {
+        submitStatus.textContent = "No active tag to retry.";
+        return;
+      }
+      try {
+        await fetchJson("/api/capture/retry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tag, reason: "operator_retry" }),
+        });
+        submitStatus.textContent = "Retry requested. Waiting for result...";
+      } catch (e) {
+        submitStatus.textContent = `Retry failed: ${String(e.message || e)}`;
+      }
+    }
+
+    retryBtn.addEventListener("click", requestRetry);
+
     function setConn(connected, enabled, msg) {
       connDot.classList.toggle("ok", !!connected);
       connText.textContent = enabled ? msg : "RFID: disabled (set rfid.host in config.json)";
@@ -835,6 +877,9 @@
           tdInfo.textContent = `⚠ ${ev.tag || ""} expected ${ev.expected_number || "-"} observed ${ev.observed_number || "-"} (att ${ev.attempt || 0})`;
           tdType.style.color = "var(--danger)";
           tdInfo.style.color = "var(--danger)";
+        } else if (ev.type === "retry_requested") {
+          tdInfo.textContent = `${ev.tag || ""} retry requested (attempt ${ev.attempt || "?"})`;
+          tdType.style.color = "var(--muted)";
         } else if (ev.type === "missing_label") {
           tdInfo.textContent = `⚠ ${ev.tag || ""} has no label (att ${ev.attempt || 0})`;
           tdType.style.color = "var(--muted)";
@@ -900,6 +945,7 @@
         capObserved.textContent = observed || "-";
         capMsg.textContent = c.message || "-";
         capNumber.textContent = observed ? observed : "-----";
+        lastCaptureStatus = c;
 
         let matchStatus = "-";
         let bannerText = "Waiting for approved RFID tag...";
@@ -964,6 +1010,9 @@
         const allowSubmitRule = awaitingSubmit && !mismatch && (!!expected || backendCanSubmit === true);
         const submitAllowed = backendCanSubmit !== null ? backendCanSubmit : allowSubmitRule;
         submitBtn.disabled = !submitAllowed;
+        const disableForAttempts = (c.attempt_reset_mode === "per_tag_session") && c.max_attempts && (attempt >= c.max_attempts);
+        const retryEnabled = !!(c.tag && state !== "running" && !disableForAttempts);
+        retryBtn.disabled = !retryEnabled;
 
         const savedPath = c.submitted_path || "";
         const prefixHint = c.submitted_prefix ? `${c.submitted_prefix}.json` : "";

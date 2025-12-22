@@ -520,6 +520,7 @@ capture_status = {
     "submitted_prefix": "",
     "secondary_b64": None,
     "secondary_message": "",
+    "last_action": "",
 }
 
 
@@ -781,6 +782,48 @@ def _purge_tag_from_queue(tag: str) -> None:
                     rfid_event_queue.put_nowait(item)
                 except queue.Full:
                     break
+
+
+def _next_attempt_for_tag(tag: str) -> int:
+    norm = _normalize_tag(tag)
+    with state_lock:
+        current_tag = capture_status.get("tag")
+        current_attempt = int(capture_status.get("attempt") or 0)
+        mode = ATTEMPT_RESET_MODE
+    if mode == "per_tag_session" and current_tag == norm:
+        return current_attempt + 1
+    return 1
+
+
+def _enqueue_retry(tag: str, reason: str = "operator_retry") -> Tuple[bool, str]:
+    norm = _normalize_tag(tag)
+    if not norm:
+        return False, "Invalid tag"
+
+    next_attempt = _next_attempt_for_tag(norm)
+    if ATTEMPT_RESET_MODE == "per_tag_session" and next_attempt > CAPTURE_MAX_ATTEMPTS:
+        return False, f"Max attempts reached ({next_attempt - 1}/{CAPTURE_MAX_ATTEMPTS})"
+
+    _purge_tag_from_queue(norm)
+    try:
+        rfid_event_queue.put_nowait(norm)
+    except queue.Full:
+        return False, "RFID queue full"
+
+    now = time.time()
+    _append_event(
+        {
+            "type": "retry_requested",
+            "time": now,
+            "time_iso": _utc_iso(now),
+            "tag": norm,
+            "attempt": next_attempt,
+            "requested_by": reason,
+        }
+    )
+    with state_lock:
+        capture_status["last_action"] = "retry"
+    return True, "Enqueued"
 
 
 def _handle_rfid_tag(raw_tag: str, source: str) -> None:
@@ -2044,6 +2087,43 @@ def api_submit_capture():
     )
 
     return jsonify({"success": True, "saved": saved})
+
+
+@app.route("/api/capture/retry", methods=["POST"])
+def api_capture_retry():
+    payload = request.get_json(silent=True) or {}
+    req_tag = (payload.get("tag") or "").strip()
+    reason = (payload.get("reason") or "operator_retry").strip() or "operator_retry"
+
+    with state_lock:
+        current_state = capture_status.get("state") or ""
+        current_tag = capture_status.get("tag") or ""
+        current_attempt = int(capture_status.get("attempt") or 0)
+
+    tag = req_tag or current_tag
+    tag_norm = _normalize_tag(tag)
+    if not tag_norm:
+        return jsonify({"success": False, "message": "No active tag to retry"}), 400
+
+    if current_state == "running":
+        return jsonify({"success": False, "message": "Capture already running"}), 409
+
+    next_attempt = _next_attempt_for_tag(tag_norm)
+    if ATTEMPT_RESET_MODE == "per_tag_session" and next_attempt > CAPTURE_MAX_ATTEMPTS:
+        return jsonify(
+            {
+                "success": False,
+                "error": "max_attempts_reached",
+                "attempt": current_attempt,
+                "max_attempts": CAPTURE_MAX_ATTEMPTS,
+            }
+        ), 409
+
+    ok, msg = _enqueue_retry(tag_norm, reason)
+    if not ok:
+        return jsonify({"success": False, "message": msg}), 409
+
+    return jsonify({"success": True, "tag": tag_norm, "attempt": next_attempt})
 
 
 @app.route("/capture")
