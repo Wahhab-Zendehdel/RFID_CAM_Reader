@@ -37,6 +37,7 @@ DEFAULT_APP_CONFIG = {
         "host": "192.168.1.173",
         "port": 554,
         "username": "user1",
+        "password": "Admin123456",
         "path": "/live/0/main",
         "rtsp_url": "",
     },
@@ -50,6 +51,15 @@ DEFAULT_APP_CONFIG = {
         "retry_interval_seconds": 0.4,
         "timeout_seconds": 30.0,
         "target_digits": 5,
+        "single_shot_per_detection": True,
+        "max_attempts": 5,
+        "attempt_reset_mode": "every_detection",  # every_detection | per_tag_session
+        "secondary_snapshot_mode": "on_success",  # on_success | on_every_detection
+    },
+    "storage": {
+        "output_dir": "submissions",
+        "mismatch_severity": "warning",
+        "secondary_capture_behavior": "default",
     },
 }
 
@@ -63,22 +73,43 @@ def _deep_update(dst: dict, src: dict) -> dict:
     return dst
 
 
+def _missing_defaults(template: dict, data: dict) -> bool:
+    """
+    Return True if any key in template is missing from data (recursively for dicts).
+    """
+    if not isinstance(template, dict):
+        return False
+    if not isinstance(data, dict):
+        return True
+    for key, value in template.items():
+        if key not in data:
+            return True
+        if isinstance(value, dict):
+            if _missing_defaults(value, data.get(key, {})):
+                return True
+    return False
+
+
 def _load_app_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_APP_CONFIG))
 
+    raw = None
     if APP_CONFIG_PATH.exists():
         try:
             raw = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                _deep_update(cfg, raw)
+        except Exception:
+            raw = None
+
+    if isinstance(raw, dict):
+        _deep_update(cfg, raw)
+
+    needs_write = _missing_defaults(DEFAULT_APP_CONFIG, raw if isinstance(raw, dict) else {}) or not APP_CONFIG_PATH.exists()
+
+    if needs_write:
+        try:
+            APP_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         except Exception:
             pass
-        return cfg
-
-    try:
-        APP_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 
     return cfg
 
@@ -167,9 +198,11 @@ OCR_DIGITS_ONLY       = True
 
 # Approved RFID tags storage
 APPROVED_TAGS_PATH = BASE_DIR / "approved_tags.json"
+TAG_LABELS_PATH = BASE_DIR / "tag_labels.json"
 
 rfid_cfg = APP_CONFIG.get("rfid", {})
 capture_cfg = APP_CONFIG.get("capture", {})
+storage_cfg = APP_CONFIG.get("storage", {})
 
 # RFID reader connection (configure in config.json or via env vars)
 RFID_HOST = _env_str("RFID_HOST") or str(rfid_cfg.get("host") or "").strip()
@@ -181,16 +214,28 @@ TAG_COOLDOWN_SECONDS = float(os.environ.get("TAG_COOLDOWN_SECONDS", "3.0"))
 TAG_SUBMIT_COOLDOWN_SECONDS = float(os.environ.get("TAG_SUBMIT_COOLDOWN_SECONDS", "300.0"))  # 5 minutes after submit
 
 # Captured data persistence
-CAPTURE_OUTPUT_DIR = BASE_DIR / "submissions"
+CAPTURE_OUTPUT_DIR = Path(_resolve_path(storage_cfg.get("output_dir", "submissions")))
 CAPTURE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Capture loop tuning (until a 5-digit number is found)
 CAPTURE_RETRY_INTERVAL_SECONDS = _env_float("CAPTURE_RETRY_INTERVAL_SECONDS") or float(capture_cfg.get("retry_interval_seconds") or 0.4)
 CAPTURE_TIMEOUT_SECONDS = _env_float("CAPTURE_TIMEOUT_SECONDS") or float(capture_cfg.get("timeout_seconds") or 30.0)
 TARGET_DIGITS = int(capture_cfg.get("target_digits") or 5)
+CAPTURE_SINGLE_SHOT = bool(capture_cfg.get("single_shot_per_detection", True))
+CAPTURE_MAX_ATTEMPTS = max(1, int(capture_cfg.get("max_attempts") or 5))
+ATTEMPT_RESET_MODE = str(capture_cfg.get("attempt_reset_mode") or "every_detection").strip().lower()
+if ATTEMPT_RESET_MODE not in {"every_detection", "per_tag_session"}:
+    ATTEMPT_RESET_MODE = "every_detection"
+SECONDARY_SNAPSHOT_MODE = str(capture_cfg.get("secondary_snapshot_mode") or "on_success").strip().lower()
+if SECONDARY_SNAPSHOT_MODE not in {"on_success", "on_every_detection"}:
+    SECONDARY_SNAPSHOT_MODE = "on_success"
 
 approved_tags_lock = threading.Lock()
 approved_tags = set()
+tag_labels_lock = threading.Lock()
+TAG_LABELS_VERSION = 1
+tag_labels_data = {"version": TAG_LABELS_VERSION, "tag_to_label": {}}
+TAG_LABEL_PATTERN = re.compile(r"^\d{5}$")
 
 
 def _normalize_tag(tag: str) -> str:
@@ -240,6 +285,113 @@ with approved_tags_lock:
             _save_approved_tags_to_disk(approved_tags)
         except Exception:
             pass
+
+
+def _load_tag_labels_from_disk() -> dict:
+    data = {"version": TAG_LABELS_VERSION, "tag_to_label": {}}
+    if not TAG_LABELS_PATH.exists():
+        return data
+
+    try:
+        raw = json.loads(TAG_LABELS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return data
+
+    if not isinstance(raw, dict):
+        return data
+
+    if isinstance(raw.get("version"), int):
+        data["version"] = raw["version"]
+
+    raw_map = raw.get("tag_to_label") or raw.get("labels") or {}
+    if isinstance(raw_map, dict):
+        clean_map = {}
+        for raw_tag, raw_label in raw_map.items():
+            norm = _normalize_tag(raw_tag)
+            if not norm:
+                continue
+            label_str = str(raw_label).strip()
+            if TAG_LABEL_PATTERN.fullmatch(label_str):
+                clean_map[norm] = label_str
+        data["tag_to_label"] = clean_map
+
+    return data
+
+
+def _save_tag_labels_to_disk(data: dict) -> None:
+    payload = {
+        "version": data.get("version", TAG_LABELS_VERSION),
+        "tag_to_label": dict(data.get("tag_to_label") or {}),
+    }
+    tmp_path = TAG_LABELS_PATH.with_suffix(TAG_LABELS_PATH.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path.replace(TAG_LABELS_PATH)
+
+
+def _get_label_for_tag(tag: str) -> str:
+    norm = _normalize_tag(tag)
+    if not norm:
+        return ""
+    with tag_labels_lock:
+        return (tag_labels_data.get("tag_to_label") or {}).get(norm, "")
+
+
+def _set_label_for_tag(tag: str, label: str) -> Tuple[bool, str]:
+    norm = _normalize_tag(tag)
+    if not norm:
+        return False, "Invalid tag"
+
+    label_str = (label or "").strip()
+    if not TAG_LABEL_PATTERN.fullmatch(label_str):
+        return False, "Invalid label; must be exactly 5 digits"
+
+    with tag_labels_lock:
+        tag_labels_data.setdefault("tag_to_label", {})
+        tag_labels_data["tag_to_label"][norm] = label_str
+        tag_labels_data["version"] = TAG_LABELS_VERSION
+        try:
+            _save_tag_labels_to_disk(tag_labels_data)
+        except Exception as e:
+            tag_labels_data["tag_to_label"].pop(norm, None)
+            return False, f"Failed to save label: {e}"
+
+    return True, "Label saved"
+
+
+def _delete_label_for_tag(tag: str) -> Tuple[bool, str]:
+    norm = _normalize_tag(tag)
+    if not norm:
+        return False, "Invalid tag"
+
+    with tag_labels_lock:
+        existed = False
+        tag_labels_data.setdefault("tag_to_label", {})
+        if norm in tag_labels_data["tag_to_label"]:
+            existed = True
+            tag_labels_data["tag_to_label"].pop(norm, None)
+        tag_labels_data["version"] = TAG_LABELS_VERSION
+        try:
+            _save_tag_labels_to_disk(tag_labels_data)
+        except Exception as e:
+            return False, f"Failed to save labels: {e}"
+
+    return True, "Removed" if existed else "No label found"
+
+
+with tag_labels_lock:
+    tag_labels_data = _load_tag_labels_from_disk()
+    if not isinstance(tag_labels_data.get("tag_to_label"), dict):
+        tag_labels_data["tag_to_label"] = {}
+    if not TAG_LABELS_PATH.exists():
+        try:
+            _save_tag_labels_to_disk(tag_labels_data)
+        except Exception:
+            pass
+
+
+def _tag_label_map() -> dict:
+    with tag_labels_lock:
+        return dict(tag_labels_data.get("tag_to_label") or {})
 
 
 def _approve_tag(tag: str) -> Tuple[bool, str]:
@@ -298,10 +450,17 @@ capture_status = {
     "tag": "",
     "started_time": None,
     "attempt": 0,
+    "max_attempts": CAPTURE_MAX_ATTEMPTS,
+    "attempt_reset_mode": ATTEMPT_RESET_MODE,
     "message": "",
     "raw_text": "",
     "number": "",
     "number_time": None,
+    "expected_number": "",
+    "observed_number": "",
+    "mismatch": False,
+    "mismatch_reason": "",
+    "mismatch_message": "",
     "original_b64": None,
     "paper_b64": None,
     "awaiting_submit": False,
@@ -313,6 +472,45 @@ capture_status = {
 }
 
 
+def _apply_label_to_active_capture(tag: str, label: str) -> None:
+    """
+    Update in-memory capture state if a label changes for the currently active tag.
+    """
+    norm = _normalize_tag(tag)
+    if not norm:
+        return
+    label_str = (label or "").strip()
+    with state_lock:
+        if capture_status.get("tag") != norm:
+            return
+        capture_status["expected_number"] = label_str
+
+        observed = capture_status.get("observed_number") or capture_status.get("number") or ""
+        if not observed:
+            capture_status["mismatch"] = False
+            capture_status["mismatch_reason"] = ""
+            capture_status["mismatch_message"] = ""
+            if not label_str:
+                capture_status["state"] = "missing_label"
+                capture_status["message"] = "No stored label for this tag"
+            return
+
+        mismatch = bool(label_str and observed != label_str)
+        capture_status["mismatch"] = mismatch
+        capture_status["mismatch_reason"] = "mismatch" if mismatch else ""
+        capture_status["mismatch_message"] = f"Expected {label_str}, observed {observed}" if mismatch else ""
+        if not label_str:
+            capture_status["mismatch_reason"] = "missing_label"
+            capture_status["mismatch_message"] = "No stored label for this tag"
+            capture_status["state"] = "missing_label"
+            capture_status["message"] = capture_status["mismatch_message"]
+        elif mismatch:
+            capture_status["state"] = "mismatch"
+            capture_status["message"] = capture_status["mismatch_message"]
+        else:
+            if capture_status.get("awaiting_submit"):
+                capture_status["state"] = "matched"
+                capture_status["message"] = "Captured. Awaiting submit."
 # ============================
 # Load mask
 # ============================
@@ -549,7 +747,8 @@ def _handle_rfid_tag(raw_tag: str, source: str) -> None:
     # If we recently processed this tag, skip re-queuing to keep last images/number visible
     with state_lock:
         last_num_time = capture_status.get("number_time") or capture_status.get("started_time") or 0
-        last_tag_active = capture_status.get("tag") == tag and capture_status.get("state") in {"running", "success", "awaiting_submit", "submitted"}
+        active_states = {"running", "success", "awaiting_submit", "submitted", "matched", "mismatch", "missing_label"}
+        last_tag_active = capture_status.get("tag") == tag and capture_status.get("state") in active_states
         pending_submit = bool(capture_status.get("awaiting_submit"))
         cooldown_until = float(tag_submit_cooldowns.get(tag) or 0.0)
 
@@ -1071,6 +1270,12 @@ def _save_capture_to_disk(capture: dict) -> dict:
     meta = {
         "tag": capture.get("tag") or "",
         "number": capture.get("number") or "",
+        "observed_number": capture.get("observed_number") or capture.get("number") or "",
+        "expected_number": capture.get("expected_number") or "",
+        "mismatch": bool(capture.get("mismatch")),
+        "mismatch_reason": capture.get("mismatch_reason") or "",
+        "mismatch_message": capture.get("mismatch_message") or "",
+        "state": capture.get("state") or "",
         "raw_text": capture.get("raw_text") or "",
         "attempt": attempt,
         "message": capture.get("message") or "",
@@ -1122,7 +1327,7 @@ capture_thread = None
 
 def capture_worker():
     """
-    Consume approved RFID tag events and run capture/OCR until a 5-digit number is found.
+    Consume approved RFID tag events and run one capture/OCR attempt per detection.
     """
     global capture_running
 
@@ -1142,8 +1347,10 @@ def capture_worker():
 
 
 def _process_capture_for_tag(tag: str) -> None:
+    now = time.time()
+    expected_number = _get_label_for_tag(tag)
+
     if not _is_tag_approved(tag):
-        now = time.time()
         with state_lock:
             capture_status.update(
                 {
@@ -1151,10 +1358,19 @@ def _process_capture_for_tag(tag: str) -> None:
                     "tag": tag,
                     "started_time": now,
                     "attempt": 0,
+                    "max_attempts": CAPTURE_MAX_ATTEMPTS,
+                    "attempt_reset_mode": ATTEMPT_RESET_MODE,
                     "message": "Tag not approved",
                     "raw_text": "",
                     "number": "",
                     "number_time": None,
+                    "observed_number": "",
+                    "expected_number": expected_number,
+                    "mismatch": False,
+                    "mismatch_reason": "tag_not_approved",
+                    "mismatch_message": "Tag not approved",
+                    "original_b64": None,
+                    "paper_b64": None,
                     "awaiting_submit": False,
                     "submitted_path": "",
                     "submitted_time": None,
@@ -1163,20 +1379,88 @@ def _process_capture_for_tag(tag: str) -> None:
                     "secondary_message": "",
                 }
             )
+        _append_event(
+            {
+                "type": "tag_not_approved",
+                "time": now,
+                "time_iso": _utc_iso(now),
+                "tag": tag,
+            }
+        )
         return
 
-    start = time.time()
+    with state_lock:
+        prev_tag = capture_status.get("tag")
+        prev_attempt = int(capture_status.get("attempt") or 0)
+        prev_started = capture_status.get("started_time") or now
+
+    if ATTEMPT_RESET_MODE == "per_tag_session" and prev_tag == tag:
+        attempt_base = prev_attempt
+        started_time = prev_started
+    else:
+        attempt_base = 0
+        started_time = now
+
+    if attempt_base >= CAPTURE_MAX_ATTEMPTS:
+        with state_lock:
+            capture_status.update(
+                {
+                    "state": "failed",
+                    "tag": tag,
+                    "started_time": started_time,
+                    "attempt": attempt_base,
+                    "max_attempts": CAPTURE_MAX_ATTEMPTS,
+                    "attempt_reset_mode": ATTEMPT_RESET_MODE,
+                    "message": f"Max attempts reached ({attempt_base}/{CAPTURE_MAX_ATTEMPTS})",
+                    "raw_text": "",
+                    "number": "",
+                    "number_time": None,
+                    "observed_number": "",
+                    "expected_number": expected_number,
+                    "mismatch": False,
+                    "mismatch_reason": "max_attempts",
+                    "mismatch_message": "Max attempts reached",
+                    "original_b64": None,
+                    "paper_b64": None,
+                    "awaiting_submit": False,
+                    "submitted_path": "",
+                    "submitted_time": None,
+                    "submitted_prefix": "",
+                    "secondary_b64": None,
+                    "secondary_message": "",
+                }
+            )
+        _append_event(
+            {
+                "type": "max_attempts",
+                "time": now,
+                "time_iso": _utc_iso(now),
+                "tag": tag,
+                "attempt": attempt_base,
+            }
+        )
+        return
+
+    attempt = attempt_base + 1
+
     with state_lock:
         capture_status.update(
             {
                 "state": "running",
                 "tag": tag,
-                "started_time": start,
-                "attempt": 0,
+                "started_time": started_time,
+                "attempt": attempt,
+                "max_attempts": CAPTURE_MAX_ATTEMPTS,
+                "attempt_reset_mode": ATTEMPT_RESET_MODE,
                 "message": "Capturing...",
                 "raw_text": "",
                 "number": "",
                 "number_time": None,
+                "observed_number": "",
+                "expected_number": expected_number,
+                "mismatch": False,
+                "mismatch_reason": "",
+                "mismatch_message": "",
                 "original_b64": None,
                 "paper_b64": None,
                 "awaiting_submit": False,
@@ -1188,84 +1472,126 @@ def _process_capture_for_tag(tag: str) -> None:
             }
         )
 
-    attempt = 0
-    while capture_running:
-        attempt += 1
-        success, message, text, annotated, warped = grab_and_process()
-        number = _extract_target_digits(text) if success else ""
+    success, message, text, annotated, warped = grab_and_process()
+    observed_number = _extract_target_digits(text) if success else ""
 
-        original_b64 = None
-        paper_b64 = None
-        if annotated is not None:
-            try:
-                original_b64 = img_to_base64_jpeg(annotated)
-            except Exception:
-                original_b64 = None
-        if warped is not None:
-            try:
-                paper_b64 = img_to_base64_jpeg(warped)
-            except Exception:
-                paper_b64 = None
+    original_b64 = None
+    paper_b64 = None
+    if annotated is not None:
+        try:
+            original_b64 = img_to_base64_jpeg(annotated)
+        except Exception:
+            original_b64 = None
+    if warped is not None:
+        try:
+            paper_b64 = img_to_base64_jpeg(warped)
+        except Exception:
+            paper_b64 = None
 
-        with state_lock:
-            capture_status["attempt"] = attempt
-            capture_status["message"] = message
-            capture_status["raw_text"] = text or ""
-            capture_status["original_b64"] = original_b64
-            capture_status["paper_b64"] = paper_b64
+    sec_b64 = None
+    sec_msg = ""
+    if SECONDARY_SNAPSHOT_MODE == "on_every_detection" or (SECONDARY_SNAPSHOT_MODE == "on_success" and observed_number):
+        sec_b64, sec_msg = grab_secondary_snapshot()
 
-        if number:
-            sec_b64, sec_msg = grab_secondary_snapshot()
-            done = time.time()
-            with state_lock:
-                capture_status["state"] = "awaiting_submit"
-                capture_status["number"] = number
-                capture_status["number_time"] = done
-                capture_status["message"] = "Captured. Awaiting submit."
-                capture_status["awaiting_submit"] = True
-                capture_status["submitted_path"] = ""
-                capture_status["submitted_time"] = None
-                capture_status["submitted_prefix"] = ""
-                capture_status["secondary_b64"] = sec_b64
-                capture_status["secondary_message"] = sec_msg or ""
+    state = "running"
+    awaiting_submit = False
+    mismatch = False
+    mismatch_reason = ""
+    mismatch_message = ""
+    message_out = message
+    number_time = None
+    number = ""
 
-            _clear_rfid_queue()
-            _append_event(
-                {
-                    "type": "number",
-                    "time": done,
-                    "time_iso": _utc_iso(done),
-                    "tag": tag,
-                    "number": number,
-                    "attempt": attempt,
-                    "awaiting_submit": True,
-                }
-            )
-            return
+    if not success:
+        state = "no_paper"
+        message_out = message or "No paper detected"
+    elif not observed_number:
+        state = "ocr_failed"
+        message_out = "OCR did not produce a 5-digit number"
+    else:
+        number_time = time.time()
+        number = observed_number
+        awaiting_submit = True
+        state = "matched"
+        message_out = "Captured. Awaiting submit."
+        if not expected_number:
+            state = "missing_label"
+            mismatch_reason = "missing_label"
+            mismatch_message = "No stored label for this tag"
+            message_out = mismatch_message
+        elif observed_number != expected_number:
+            state = "mismatch"
+            mismatch = True
+            mismatch_reason = "mismatch"
+            mismatch_message = f"Expected {expected_number}, observed {observed_number}"
+            message_out = mismatch_message
 
-        if CAPTURE_TIMEOUT_SECONDS > 0 and (time.time() - start) >= CAPTURE_TIMEOUT_SECONDS:
-            end = time.time()
-            with state_lock:
-                capture_status["state"] = "failed"
-                capture_status["message"] = f"Timed out after {attempt} attempts"
-                capture_status["number_time"] = end
-                capture_status["awaiting_submit"] = False
-                capture_status["submitted_path"] = ""
-                capture_status["submitted_time"] = None
-                capture_status["submitted_prefix"] = ""
+    if not awaiting_submit and attempt >= CAPTURE_MAX_ATTEMPTS:
+        state = "failed"
+        base_reason = mismatch_message or message_out
+        mismatch_reason = mismatch_reason or "max_attempts"
+        mismatch_message = base_reason + f" (max attempts reached {attempt}/{CAPTURE_MAX_ATTEMPTS})" if base_reason else f"Max attempts reached ({attempt}/{CAPTURE_MAX_ATTEMPTS})"
+        message_out = mismatch_message
 
-            _append_event(
-                {
-                    "type": "timeout",
-                    "time": end,
-                    "time_iso": _utc_iso(end),
-                    "tag": tag,
-                    "attempt": attempt,
-                }
-            )
-            return
+    with state_lock:
+        capture_status.update(
+            {
+                "state": state,
+                "message": message_out,
+                "raw_text": text or "",
+                "number": number,
+                "number_time": number_time,
+                "observed_number": observed_number,
+                "expected_number": expected_number,
+                "mismatch": mismatch,
+                "mismatch_reason": mismatch_reason,
+                "mismatch_message": mismatch_message,
+                "original_b64": original_b64,
+                "paper_b64": paper_b64,
+                "awaiting_submit": awaiting_submit,
+                "submitted_path": "",
+                "submitted_time": None,
+                "submitted_prefix": "",
+                "secondary_b64": sec_b64,
+                "secondary_message": sec_msg or "",
+                "attempt": attempt,
+                "max_attempts": CAPTURE_MAX_ATTEMPTS,
+                "attempt_reset_mode": ATTEMPT_RESET_MODE,
+            }
+        )
 
-        time.sleep(CAPTURE_RETRY_INTERVAL_SECONDS)
+    event_type = "capture_attempt"
+    if state in {"matched", "awaiting_submit"}:
+        event_type = "matched"
+    elif state == "mismatch":
+        event_type = "mismatch"
+    elif state == "missing_label":
+        event_type = "missing_label"
+    elif state in {"no_paper", "ocr_failed"}:
+        event_type = state
+    elif state == "failed":
+        event_type = "failed"
+
+    event_time = number_time or time.time()
+    _append_event(
+        {
+            "type": event_type,
+            "time": event_time,
+            "time_iso": _utc_iso(event_time),
+            "tag": tag,
+            "expected_number": expected_number,
+            "observed_number": observed_number,
+            "mismatch": mismatch,
+            "mismatch_reason": mismatch_reason,
+            "mismatch_message": mismatch_message,
+            "attempt": attempt,
+            "state": state,
+            "message": message_out,
+        }
+    )
+
+    if awaiting_submit:
+        _clear_rfid_queue()
 
 
 # ============================
@@ -1294,29 +1620,57 @@ def index():
 def api_get_tags():
     with approved_tags_lock:
         tags = sorted(approved_tags)
-    return jsonify({"tags": tags, "count": len(tags)})
+    labels = _tag_label_map()
+    entries = [{"tag": t, "label": labels.get(t, "")} for t in tags]
+    return jsonify(
+        {
+            "tags": tags,
+            "count": len(tags),
+            "tag_labels": labels,
+            "entries": entries,
+        }
+    )
 
 
 @app.route("/api/tags", methods=["POST"])
 def api_add_tag():
     payload = request.get_json(silent=True) or {}
     raw = payload.get("tag", "")
+    label = (payload.get("label") or payload.get("expected_number") or "").strip()
     tag = _normalize_tag(raw)
     if not tag:
         return jsonify({"success": False, "message": "Missing tag"}), 400
 
+    if label and not TAG_LABEL_PATTERN.fullmatch(label):
+        return jsonify({"success": False, "message": "Label must be exactly 5 digits"}), 400
+
     added, msg = _approve_tag(tag)
     if not added and msg == "Already approved":
-        with approved_tags_lock:
-            tags = sorted(approved_tags)
-        return jsonify({"success": True, "tag": tag, "tags": tags, "count": len(tags), "message": msg})
-    if not added:
+        pass
+    elif not added:
         return jsonify({"success": False, "message": msg}), 500
+
+    if label:
+        ok_label, msg_label = _set_label_for_tag(tag, label)
+        if not ok_label:
+            return jsonify({"success": False, "message": msg_label}), 500
+        _apply_label_to_active_capture(tag, label)
 
     with approved_tags_lock:
         tags = sorted(approved_tags)
+    labels = _tag_label_map()
 
-    return jsonify({"success": True, "tag": tag, "tags": tags, "count": len(tags)})
+    return jsonify(
+        {
+            "success": True,
+            "tag": tag,
+            "label": labels.get(tag, ""),
+            "tags": tags,
+            "count": len(tags),
+            "tag_labels": labels,
+            "message": msg,
+        }
+    )
 
 
 @app.route("/api/tags/<tag>", methods=["DELETE"])
@@ -1337,7 +1691,64 @@ def api_delete_tag(tag: str):
 
         tags = sorted(approved_tags)
 
-    return jsonify({"success": True, "removed": existed, "tag": tag_norm, "tags": tags, "count": len(tags)})
+    label_removed = False
+    label_message = ""
+    if _get_label_for_tag(tag_norm):
+        ok_label, label_message = _delete_label_for_tag(tag_norm)
+        label_removed = ok_label
+        if not ok_label:
+            return jsonify({"success": False, "message": label_message}), 500
+        _apply_label_to_active_capture(tag_norm, "")
+
+    labels = _tag_label_map()
+
+    response = {"success": True, "removed": existed, "tag": tag_norm, "tags": tags, "count": len(tags), "tag_labels": labels}
+    if label_message:
+        response["label_message"] = label_message
+    response["label_removed"] = label_removed
+    return jsonify(response)
+
+
+@app.route("/api/tags/<tag>/label", methods=["PUT", "POST"])
+def api_set_tag_label(tag: str):
+    tag_norm = _normalize_tag(tag)
+    if not tag_norm:
+        return jsonify({"success": False, "message": "Invalid tag"}), 400
+
+    payload = request.get_json(silent=True) or {}
+    label = (payload.get("label") or payload.get("expected_number") or payload.get("number") or "").strip()
+    if not label:
+        return jsonify({"success": False, "message": "Missing label"}), 400
+    if not TAG_LABEL_PATTERN.fullmatch(label):
+        return jsonify({"success": False, "message": "Label must be exactly 5 digits"}), 400
+
+    ok, msg = _set_label_for_tag(tag_norm, label)
+    if not ok:
+        return jsonify({"success": False, "message": msg}), 500
+
+    _apply_label_to_active_capture(tag_norm, label)
+    labels = _tag_label_map()
+    return jsonify({"success": True, "tag": tag_norm, "label": label, "tag_labels": labels})
+
+
+@app.route("/api/tag-label", methods=["POST"])
+def api_set_tag_label_body():
+    payload = request.get_json(silent=True) or {}
+    tag = _normalize_tag(payload.get("tag", ""))
+    label = (payload.get("label") or payload.get("expected_number") or payload.get("number") or "").strip()
+    if not tag:
+        return jsonify({"success": False, "message": "Missing tag"}), 400
+    if not label:
+        return jsonify({"success": False, "message": "Missing label"}), 400
+    if not TAG_LABEL_PATTERN.fullmatch(label):
+        return jsonify({"success": False, "message": "Label must be exactly 5 digits"}), 400
+
+    ok, msg = _set_label_for_tag(tag, label)
+    if not ok:
+        return jsonify({"success": False, "message": msg}), 500
+    _apply_label_to_active_capture(tag, label)
+    labels = _tag_label_map()
+    return jsonify({"success": True, "tag": tag, "label": label, "tag_labels": labels})
 
 
 @app.route("/api/status", methods=["GET"])

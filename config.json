@@ -7,6 +7,14 @@
     "path": "/live/0/main",
     "rtsp_url": ""
   },
+  "secondary_camera": {
+    "host": "192.168.1.173",
+    "port": 554,
+    "username": "user1",
+    "password": "Admin123456",
+    "path": "/live/0/main",
+    "rtsp_url": ""
+  },
   "rfid": {
     "host": "192.168.1.2",
     "port": 6000,
@@ -16,6 +24,15 @@
   "capture": {
     "retry_interval_seconds": 0.4,
     "timeout_seconds": 30.0,
-    "target_digits": 5
+    "target_digits": 5,
+    "single_shot_per_detection": true,
+    "max_attempts": 5,
+    "attempt_reset_mode": "every_detection",
+    "secondary_snapshot_mode": "on_success"
+  },
+  "storage": {
+    "output_dir": "submissions",
+    "mismatch_severity": "warning",
+    "secondary_capture_behavior": "default"
   }
 }
