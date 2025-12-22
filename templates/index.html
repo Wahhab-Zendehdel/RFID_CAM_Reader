@@ -469,6 +469,14 @@
         <div class="capture-layout">
           <div class="panel" style="grid-row: 1; grid-column: 1;">
             <div class="hint" id="approved-count">Approved tags: 0</div>
+            <div class="row" style="margin: 6px 0;">
+              <select id="group-select" style="flex:1 1 auto; padding:10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+                <option value="">Select group...</option>
+              </select>
+              <button class="secondary" id="group-start-btn" type="button">Start Group</button>
+              <button class="secondary" id="group-stop-btn" type="button">Stop</button>
+            </div>
+            <div class="status" id="group-status">No active group.</div>
             <div class="kv" style="margin-top: 10px;">
               <div class="k">Last RFID tag</div><div class="v" id="last-tag">-</div>
               <div class="k">Approved</div><div class="v" id="last-approved">-</div>
@@ -518,7 +526,8 @@
           </div>
 
           <div class="panel" style="grid-row: 2; grid-column: 1;">
-            <div class="hint" style="margin-bottom: 8px;">Active tags</div>
+            <div class="hint" style="margin-bottom: 8px;">Active tags / Group</div>
+            <div class="status" id="group-sets-summary">Required/Seen/OCR sets</div>
             <table>
               <thead>
                 <tr>
@@ -602,6 +611,11 @@
     const eventsBody = document.getElementById("events");
     const activeTagsBody = document.getElementById("active-tags-body");
     const mismatchList = document.getElementById("mismatch-list");
+    const groupSelect = document.getElementById("group-select");
+    const groupStartBtn = document.getElementById("group-start-btn");
+    const groupStopBtn = document.getElementById("group-stop-btn");
+    const groupStatus = document.getElementById("group-status");
+    const groupSetsSummary = document.getElementById("group-sets-summary");
 
     let activeTab = "tags";
     let pollInFlight = false;
@@ -611,6 +625,7 @@
     let lastListenTs = 0;
     const LISTEN_DEBOUNCE_SECONDS = 1.0;
     let lastCaptureStatus = {};
+    let groupsCache = [];
     function buildActiveTags(c) {
       if (Array.isArray(c.active_tags) && c.active_tags.length) return c.active_tags;
       const legacyTag = c.tag || "";
@@ -851,6 +866,54 @@
       if (e.key === "Enter") addTag();
     });
 
+    async function loadGroups() {
+      try {
+        const data = await fetchJson("/api/groups");
+        groupsCache = data.groups || [];
+        groupSelect.innerHTML = '<option value="">Select group...</option>';
+        for (const g of groupsCache) {
+          const opt = document.createElement("option");
+          opt.value = g.group_id || "";
+          opt.textContent = `${g.group_id || ""} ${g.name ? "- " + g.name : ""}`.trim();
+          groupSelect.appendChild(opt);
+        }
+      } catch (e) {
+        groupStatus.textContent = `Failed to load groups: ${String(e.message || e)}`;
+      }
+    }
+
+    async function startGroup() {
+      const gid = groupSelect.value;
+      if (!gid) {
+        groupStatus.textContent = "Select a group first.";
+        return;
+      }
+      groupStartBtn.disabled = true;
+      try {
+        await fetchJson(`/api/groups/${encodeURIComponent(gid)}/start`, { method: "POST" });
+        groupStatus.textContent = `Group ${gid} started.`;
+      } catch (e) {
+        groupStatus.textContent = `Failed to start: ${String(e.message || e)}`;
+      } finally {
+        groupStartBtn.disabled = false;
+      }
+    }
+
+    async function stopGroup() {
+      groupStopBtn.disabled = true;
+      try {
+        await fetchJson("/api/groups/stop", { method: "POST" });
+        groupStatus.textContent = "Group stopped.";
+      } catch (e) {
+        groupStatus.textContent = `Failed to stop: ${String(e.message || e)}`;
+      } finally {
+        groupStopBtn.disabled = false;
+      }
+    }
+
+    groupStartBtn.addEventListener("click", startGroup);
+    groupStopBtn.addEventListener("click", stopGroup);
+
     async function submitCapture() {
       submitBtn.disabled = true;
       submitStatus.textContent = "Submitting...";
@@ -979,6 +1042,7 @@
         const r = data.rfid || {};
         const c = data.capture || {};
         const activeList = buildActiveTags(c);
+        const group = c.group || data.group_session || {};
 
         approvedCount.textContent = `Approved tags: ${data.approved_tags_count || 0}`;
 
@@ -1074,7 +1138,8 @@
 
         const awaitingSubmit = !!c.awaiting_submit;
         const backendCanSubmit = typeof c.can_submit === "boolean" ? c.can_submit : null;
-        const allowSubmitRule = awaitingSubmit && !mismatch && (!!expected || backendCanSubmit === true);
+        const groupAllows = group && group.group_id ? !!group.matched : true;
+        const allowSubmitRule = awaitingSubmit && !mismatch && (!!expected || backendCanSubmit === true) && groupAllows;
         const submitAllowed = backendCanSubmit !== null ? backendCanSubmit : allowSubmitRule;
         submitBtn.disabled = !submitAllowed;
         const disableForAttempts = (c.attempt_reset_mode === "per_tag_session") && c.max_attempts && (attempt >= c.max_attempts);
@@ -1160,18 +1225,52 @@
           activeTagsBody.innerHTML = '<tr><td colspan="5" style="color: var(--muted);">No active tags.</td></tr>';
         }
 
-        // Mismatch list
-        const mismatches = c.mismatches && c.mismatches.length ? c.mismatches : activeList.filter((i) => i.mismatch || ["mismatch", "missing_label", "ocr_failed", "no_paper", "failed"].includes((i.state || "").toLowerCase()));
-        if (!mismatches.length) {
+        // Mismatch list (group-aware)
+        const mismatches = (c.mismatches && c.mismatches.length ? c.mismatches : activeList.filter((i) => i.mismatch || ["mismatch", "missing_label", "ocr_failed", "no_paper", "failed"].includes((i.state || "").toLowerCase())) ) || [];
+        const groupMismatches = [];
+        if (group && group.matched === false) {
+          if ((group.missing_tags || []).length) {
+            groupMismatches.push(...group.missing_tags.map((t) => ({ tag: t, reason: "missing_tag" })));
+          }
+          if ((group.extra_tags || []).length) {
+            groupMismatches.push(...group.extra_tags.map((t) => ({ tag: t, reason: "extra_tag" })));
+          }
+          if ((group.missing_labels || []).length) {
+            groupMismatches.push(...group.missing_labels.map((l) => ({ label: l, reason: "missing_label" })));
+          }
+          if ((group.extra_labels || []).length) {
+            groupMismatches.push(...group.extra_labels.map((l) => ({ label: l, reason: "extra_label" })));
+          }
+        }
+        const combinedMismatches = mismatches.length ? mismatches : [];
+        if (groupMismatches.length) combinedMismatches.push(...groupMismatches);
+        if (!combinedMismatches.length) {
           mismatchList.textContent = "No mismatches.";
         } else {
           mismatchList.innerHTML = "";
-          for (const m of mismatches) {
+          for (const m of combinedMismatches) {
             const div = document.createElement("div");
             const reason = (m.reason || m.state || "").replace("_", " ").toUpperCase();
-            div.textContent = `${m.tag || "-"} — ${reason}` + (m.expected_number ? ` Expected ${m.expected_number}` : "") + (m.observed_number ? `, Observed ${m.observed_number}` : m.reason === "missing_label" ? ", Missing label" : "");
+            const exp = m.expected_number ? ` Expected ${m.expected_number}` : m.label ? ` Label ${m.label}` : "";
+            const obs = m.observed_number ? `, Observed ${m.observed_number}` : "";
+            div.textContent = `${m.tag || m.label || "-"} — ${reason}${exp}${obs}`;
             mismatchList.appendChild(div);
           }
+        }
+
+        // Group display
+        if (group && group.group_id) {
+          groupStatus.textContent = `Group ${group.group_id} ${group.name ? "(" + group.name + ")" : ""} — ${group.message || ""}`;
+          const badgeClass = group.matched ? "ok" : "danger";
+          capBanner.className = `alert ${badgeClass}`;
+          capBanner.textContent = group.matched ? "GROUP MATCHED" : group.message || "GROUP MISMATCH";
+          groupSetsSummary.innerHTML = `Required tags (${(group.required_tags || []).length}): ${(group.required_tags || []).join(", ") || "-"}<br/>Seen tags (${(group.seen_tags || []).length}): ${(group.seen_tags || []).join(", ") || "-"}<br/>Required labels (${(group.required_labels || []).length}): ${(group.required_labels || []).join(", ") || "-"}<br/>OCR labels (${(group.ocr_labels || []).length}): ${(group.ocr_labels || []).join(", ") || "-"}`;
+          if (groupSelect && group.group_id !== groupSelect.value) {
+            groupSelect.value = group.group_id;
+          }
+        } else {
+          groupStatus.textContent = "No active group.";
+          groupSetsSummary.textContent = "";
         }
 
         renderEvents(data.events || []);
@@ -1208,6 +1307,7 @@
     setListening(false);
     refreshTags();
     pollStatus();
+    loadGroups();
     setInterval(pollStatus, 1000);
   </script>
 </body>

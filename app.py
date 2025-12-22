@@ -90,6 +90,15 @@ DEFAULT_APP_CONFIG = {
         "max_candidates": 3,
         "dedupe_candidates": True,
     },
+    "group_mode": {
+        "enabled": True,
+        "auto_start_on_tag": False,
+        "default_group_id": "",
+        "tag_window_seconds_default": 5.0,
+        "strict_tag_set_default": True,
+        "strict_label_set_default": True,
+        "ocr_labels_mode": "latest_only",  # latest_only | union
+    },
 }
 
 
@@ -259,12 +268,14 @@ OCR_DIGITS_ONLY       = True
 # Approved RFID tags storage
 APPROVED_TAGS_PATH = BASE_DIR / "approved_tags.json"
 TAG_LABELS_PATH = BASE_DIR / "tag_labels.json"
+GROUPS_PATH = BASE_DIR / "groups.json"
 
 rfid_cfg = APP_CONFIG.get("rfid", {})
 capture_cfg = APP_CONFIG.get("capture", {})
 storage_cfg = APP_CONFIG.get("storage", {})
 multi_tag_cfg = APP_CONFIG.get("multi_tag", {}) or {}
 ocr_cfg = APP_CONFIG.get("ocr", {}) or {}
+group_mode_cfg = APP_CONFIG.get("group_mode", {}) or {}
 
 # RFID reader connection (configure in config.json or via env vars)
 RFID_HOST = _env_str("RFID_HOST") or str(rfid_cfg.get("host") or "").strip()
@@ -298,6 +309,15 @@ if INCREMENT_ATTEMPT_FOR not in {"all_active", "unresolved_only"}:
     INCREMENT_ATTEMPT_FOR = "unresolved_only"
 OCR_MAX_CANDIDATES = max(1, int(ocr_cfg.get("max_candidates", 3)))
 OCR_DEDUPE_CANDIDATES = bool(ocr_cfg.get("dedupe_candidates", True))
+GROUP_MODE_ENABLED = bool(group_mode_cfg.get("enabled", True))
+GROUP_AUTO_START = bool(group_mode_cfg.get("auto_start_on_tag", False))
+GROUP_DEFAULT_ID = str(group_mode_cfg.get("default_group_id", "") or "").strip()
+GROUP_TAG_WINDOW_DEFAULT = float(group_mode_cfg.get("tag_window_seconds_default", 5.0))
+GROUP_STRICT_TAG_DEFAULT = bool(group_mode_cfg.get("strict_tag_set_default", True))
+GROUP_STRICT_LABEL_DEFAULT = bool(group_mode_cfg.get("strict_label_set_default", True))
+GROUP_OCR_LABELS_MODE = str(group_mode_cfg.get("ocr_labels_mode", "latest_only") or "latest_only").strip().lower()
+if GROUP_OCR_LABELS_MODE not in {"latest_only", "union"}:
+    GROUP_OCR_LABELS_MODE = "latest_only"
 
 approved_tags_lock = threading.Lock()
 approved_tags = set()
@@ -397,6 +417,59 @@ def _save_tag_labels_to_disk(data: dict) -> None:
     tmp_path.replace(TAG_LABELS_PATH)
 
 
+def _validate_group(group: dict) -> Tuple[bool, str]:
+    if not isinstance(group, dict):
+        return False, "Invalid group data"
+    gid = str(group.get("group_id") or "").strip()
+    if not gid:
+        return False, "group_id required"
+    pairs = group.get("required_pairs") or []
+    seen_tags = set()
+    seen_labels = set()
+    for p in pairs:
+        t = _normalize_tag(p.get("tag", ""))
+        lbl = str(p.get("label", "")).strip()
+        if not t:
+            return False, "Pair missing tag"
+        if not TAG_LABEL_PATTERN.fullmatch(lbl):
+            return False, f"Invalid label for {t}"
+        if t in seen_tags:
+            return False, f"Duplicate tag {t}"
+        if lbl in seen_labels:
+            return False, f"Duplicate label {lbl}"
+        seen_tags.add(t)
+        seen_labels.add(lbl)
+    return True, "ok"
+
+
+def _load_groups_from_disk() -> dict:
+    if not GROUPS_PATH.exists():
+        return {"version": 1, "groups": []}
+    try:
+        data = json.loads(GROUPS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "groups": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "groups": []}
+    groups = data.get("groups") or []
+    clean_groups = []
+    for g in groups:
+        ok, _ = _validate_group(g)
+        if ok:
+            clean_groups.append(g)
+    return {"version": data.get("version", 1), "groups": clean_groups}
+
+
+def _save_groups_to_disk(data: dict) -> None:
+    payload = {
+        "version": data.get("version", 1),
+        "groups": data.get("groups", []),
+    }
+    tmp_path = GROUPS_PATH.with_suffix(GROUPS_PATH.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path.replace(GROUPS_PATH)
+
+
 def _get_label_for_tag(tag: str) -> str:
     norm = _normalize_tag(tag)
     if not norm:
@@ -457,6 +530,14 @@ with tag_labels_lock:
         except Exception:
             pass
 
+with state_lock:
+    groups_data = _load_groups_from_disk()
+    if not GROUPS_PATH.exists():
+        try:
+            _save_groups_to_disk(groups_data)
+        except Exception:
+            pass
+
 
 def _tag_label_map() -> dict:
     with tag_labels_lock:
@@ -500,6 +581,20 @@ rfid_event_queue: "queue.Queue[str]" = queue.Queue(maxsize=RFID_QUEUE_MAXSIZE)
 rfid_last_seen_by_tag = {}
 tag_submit_cooldowns = {}
 active_tags = {}
+groups_data = {"version": 1, "groups": []}
+active_group_session = {
+    "group_id": "",
+    "name": "",
+    "required_pairs": [],
+    "seen_tags": {},
+    "ocr_labels": set(),
+    "attempt": 0,
+    "max_attempts": CAPTURE_MAX_ATTEMPTS,
+    "strict_tag_set": GROUP_STRICT_TAG_DEFAULT,
+    "strict_label_set": GROUP_STRICT_LABEL_DEFAULT,
+    "tag_window_seconds": GROUP_TAG_WINDOW_DEFAULT,
+    "state": "idle",
+}
 
 event_log = []
 EVENT_LOG_MAX = 50
@@ -542,6 +637,7 @@ capture_status = {
     "last_action": "",
     "active_tags": [],
     "mismatches": [],
+    "group": {},
 }
 
 
@@ -854,6 +950,89 @@ def _snapshot_active_tags() -> list:
     return items
 
 
+def _find_group_for_tag(tag: str) -> dict:
+    norm = _normalize_tag(tag)
+    if not norm:
+        return {}
+    with state_lock:
+        for g in groups_data.get("groups", []):
+            if not g.get("enabled", True):
+                continue
+            for p in g.get("required_pairs", []):
+                if _normalize_tag(p.get("tag", "")) == norm:
+                    return g
+    return {}
+
+
+def _start_group_session(group: dict) -> None:
+    if not group:
+        return
+    strict_tag = group.get("settings", {}).get("strict_tag_set", GROUP_STRICT_TAG_DEFAULT)
+    strict_label = group.get("settings", {}).get("strict_label_set", GROUP_STRICT_LABEL_DEFAULT)
+    window = group.get("settings", {}).get("tag_window_seconds", GROUP_TAG_WINDOW_DEFAULT)
+    with state_lock:
+        active_group_session.update(
+            {
+                "group_id": group.get("group_id", ""),
+                "name": group.get("name", ""),
+                "required_pairs": group.get("required_pairs", []),
+                "seen_tags": {},
+                "ocr_labels": set(),
+                "attempt": 0,
+                "max_attempts": CAPTURE_MAX_ATTEMPTS,
+                "strict_tag_set": bool(strict_tag),
+                "strict_label_set": bool(strict_label),
+                "tag_window_seconds": float(window or GROUP_TAG_WINDOW_DEFAULT),
+                "state": "collecting_tags",
+            }
+        )
+
+
+def _stop_group_session() -> None:
+    with state_lock:
+        active_group_session.update(
+            {
+                "group_id": "",
+                "name": "",
+                "required_pairs": [],
+                "seen_tags": {},
+                "ocr_labels": set(),
+                "attempt": 0,
+                "state": "idle",
+            }
+        )
+
+
+def _update_group_seen_tag(tag: str, now: float) -> None:
+    norm = _normalize_tag(tag)
+    if not norm or not GROUP_MODE_ENABLED:
+        return
+    with state_lock:
+        gid = active_group_session.get("group_id")
+        if not gid:
+            if GROUP_AUTO_START:
+                group = _find_group_for_tag(norm)
+                if group:
+                    _start_group_session(group)
+                else:
+                    return
+            else:
+                return
+        required = {_normalize_tag(p.get("tag", "")) for p in active_group_session.get("required_pairs", [])}
+        if required and norm not in required:
+            return
+        active_group_session["seen_tags"][norm] = now
+
+
+def _prune_group_seen(now: float) -> None:
+    with state_lock:
+        window = float(active_group_session.get("tag_window_seconds") or GROUP_TAG_WINDOW_DEFAULT)
+        seen = active_group_session.get("seen_tags", {})
+        for t, ts in list(seen.items()):
+            if now - ts > window:
+                seen.pop(t, None)
+
+
 def _next_attempt_for_tag(tag: str) -> int:
     norm = _normalize_tag(tag)
     with state_lock:
@@ -905,6 +1084,7 @@ def _handle_rfid_tag(raw_tag: str, source: str) -> None:
     approved = _is_tag_approved(tag)
     if MULTI_TAG_ENABLED:
         _update_active_tag(tag, now)
+    _update_group_seen_tag(tag, now)
 
     debounced = False
     pending_submit = False
@@ -1600,6 +1780,7 @@ def _save_capture_to_disk(capture: dict) -> dict:
         "files": {},
         "active_tags": capture.get("active_tags") or [],
         "mismatches": capture.get("mismatches") or [],
+        "group": capture.get("group") or {},
     }
 
     if capture.get("original_b64"):
@@ -1690,9 +1871,11 @@ def _extract_candidates(text: str) -> list:
 def _process_capture_for_active_tags(trigger_tag: str) -> None:
     now = time.time()
     _update_active_tag(trigger_tag, now)
+    _update_group_seen_tag(trigger_tag, now)
     active = _snapshot_active_tags()
     if not active:
         return
+    _prune_group_seen(now)
 
     with state_lock:
         capture_status.update(
@@ -1860,6 +2043,89 @@ def _process_capture_for_active_tags(trigger_tag: str) -> None:
     awaiting_submit = all_matched and len(updated_active) > 0
     state_overall = "matched" if awaiting_submit else ("mismatch" if any_mismatch else ("missing_label" if any_missing_label else ("running" if success else "failed")))
 
+    # Group validation
+    group_status = {}
+    with state_lock:
+        gid = active_group_session.get("group_id") or ""
+        req_pairs = active_group_session.get("required_pairs", [])
+        strict_tag = active_group_session.get("strict_tag_set", GROUP_STRICT_TAG_DEFAULT)
+        strict_label = active_group_session.get("strict_label_set", GROUP_STRICT_LABEL_DEFAULT)
+        tag_window = active_group_session.get("tag_window_seconds", GROUP_TAG_WINDOW_DEFAULT)
+        seen_tags_ts = dict(active_group_session.get("seen_tags") or {})
+        group_attempt = active_group_session.get("attempt", 0)
+    required_tags = {_normalize_tag(p.get("tag", "")) for p in req_pairs}
+    required_labels = {str(p.get("label", "")).strip() for p in req_pairs}
+    seen_tags = {t for t, ts in seen_tags_ts.items() if now - ts <= tag_window}
+    ocr_labels = set(candidates)
+    if GROUP_OCR_LABELS_MODE == "union":
+        with state_lock:
+            existing = set(active_group_session.get("ocr_labels") or set())
+            ocr_labels = existing.union(ocr_labels)
+            active_group_session["ocr_labels"] = ocr_labels
+    else:
+        with state_lock:
+            active_group_session["ocr_labels"] = ocr_labels
+
+    group_matched = False
+    missing_tags = []
+    extra_tags = []
+    missing_labels = []
+    extra_labels = []
+    if gid:
+        if strict_tag:
+            missing_tags = sorted(required_tags - seen_tags)
+            extra_tags = sorted(seen_tags - required_tags)
+        else:
+            missing_tags = sorted(required_tags - seen_tags)
+            extra_tags = []
+        if strict_label:
+            missing_labels = sorted(required_labels - ocr_labels)
+            extra_labels = sorted(ocr_labels - required_labels)
+        else:
+            missing_labels = sorted(required_labels - ocr_labels)
+            extra_labels = []
+        group_matched = not missing_tags and not extra_tags and not missing_labels and not extra_labels and bool(required_tags or required_labels)
+        with state_lock:
+            active_group_session["attempt"] = group_attempt + 1
+
+        group_state = "matched" if group_matched else ("mismatch" if candidates else ("ocr_failed" if success and not candidates else "no_paper"))
+        group_message = "Group matched" if group_matched else f"Missing tags: {len(missing_tags)}, Missing labels: {len(missing_labels)}, Extra labels: {len(extra_labels)}"
+        group_status = {
+            "group_id": gid,
+            "name": active_group_session.get("name") or "",
+            "required_tags": sorted(required_tags),
+            "required_labels": sorted(required_labels),
+            "seen_tags": sorted(seen_tags),
+            "ocr_labels": sorted(ocr_labels),
+            "missing_tags": missing_tags,
+            "extra_tags": extra_tags,
+            "missing_labels": missing_labels,
+            "extra_labels": extra_labels,
+            "matched": group_matched,
+            "state": group_state,
+            "message": group_message,
+            "attempt": active_group_session.get("attempt", 0),
+            "max_attempts": CAPTURE_MAX_ATTEMPTS,
+        }
+
+    # Event for group
+    if group_status:
+        _append_event(
+            {
+                "type": "multi_capture_processed",
+                "time": time.time(),
+                "time_iso": _utc_iso(time.time()),
+                "tag": trigger_tag,
+                "group_id": group_status.get("group_id"),
+                "matched": group_status.get("matched"),
+                "missing_tags": group_status.get("missing_tags"),
+                "missing_labels": group_status.get("missing_labels"),
+            }
+        )
+        awaiting_submit = awaiting_submit and group_status.get("matched", False)
+        if not group_status.get("matched", False):
+            state_overall = "mismatch"
+
     with state_lock:
         capture_status.update(
             {
@@ -1886,6 +2152,7 @@ def _process_capture_for_active_tags(trigger_tag: str) -> None:
                 "attempt_reset_mode": ATTEMPT_RESET_MODE,
                 "active_tags": updated_active,
                 "mismatches": mismatches,
+                "group": group_status,
             }
         )
 
@@ -2050,12 +2317,95 @@ def api_set_tag_label_body():
     return jsonify({"success": True, "tag": tag, "label": label, "tag_labels": labels})
 
 
+# ============================
+# Group management
+# ============================
+
+@app.route("/api/groups", methods=["GET"])
+def api_get_groups():
+    with state_lock:
+        groups = groups_data.get("groups", [])
+    return jsonify({"groups": groups, "count": len(groups)})
+
+
+@app.route("/api/groups", methods=["POST"])
+def api_create_group():
+    payload = request.get_json(silent=True) or {}
+    ok, msg = _validate_group(payload)
+    if not ok:
+        return jsonify({"success": False, "message": msg}), 400
+    with state_lock:
+        groups = groups_data.get("groups", [])
+        groups.append(payload)
+        groups_data["groups"] = groups
+        try:
+            _save_groups_to_disk(groups_data)
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Failed to save: {e}"}), 500
+    return jsonify({"success": True, "group": payload})
+
+
+@app.route("/api/groups/<group_id>", methods=["PUT"])
+def api_update_group(group_id: str):
+    payload = request.get_json(silent=True) or {}
+    payload["group_id"] = group_id
+    ok, msg = _validate_group(payload)
+    if not ok:
+        return jsonify({"success": False, "message": msg}), 400
+    with state_lock:
+        groups = groups_data.get("groups", [])
+        updated = False
+        for idx, g in enumerate(groups):
+            if g.get("group_id") == group_id:
+                groups[idx] = payload
+                updated = True
+                break
+        if not updated:
+            groups.append(payload)
+        groups_data["groups"] = groups
+        try:
+            _save_groups_to_disk(groups_data)
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Failed to save: {e}"}), 500
+    return jsonify({"success": True, "group": payload})
+
+
+@app.route("/api/groups/<group_id>", methods=["DELETE"])
+def api_delete_group(group_id: str):
+    with state_lock:
+        groups = groups_data.get("groups", [])
+        groups = [g for g in groups if g.get("group_id") != group_id]
+        groups_data["groups"] = groups
+        try:
+            _save_groups_to_disk(groups_data)
+        except Exception as e:
+            return jsonify({"success": False, "message": f"Failed to save: {e}"}), 500
+    return jsonify({"success": True})
+
+
+@app.route("/api/groups/<group_id>/start", methods=["POST"])
+def api_start_group(group_id: str):
+    with state_lock:
+        group = next((g for g in groups_data.get("groups", []) if g.get("group_id") == group_id), None)
+    if not group:
+        return jsonify({"success": False, "message": "Group not found"}), 404
+    _start_group_session(group)
+    return jsonify({"success": True, "group": group})
+
+
+@app.route("/api/groups/stop", methods=["POST"])
+def api_stop_group():
+    _stop_group_session()
+    return jsonify({"success": True})
+
+
 @app.route("/api/status", methods=["GET"])
 def api_status():
     include_images = request.args.get("include_images", "0").strip().lower() in {"1", "true", "yes", "on"}
     now = time.time()
 
     _expire_active_tags(now)
+    _prune_group_seen(now)
 
     with state_lock:
         rfid = dict(rfid_status)
@@ -2089,6 +2439,10 @@ def api_status():
         capture["paper_b64"] = None
         capture["secondary_b64"] = None
 
+    group_session = dict(active_group_session)
+    if isinstance(group_session.get("ocr_labels"), set):
+        group_session["ocr_labels"] = sorted(list(group_session["ocr_labels"]))
+
     return jsonify(
         {
             "server_time": now,
@@ -2098,6 +2452,7 @@ def api_status():
             "secondary_camera": secondary_cam,
             "capture": capture,
             "events": events,
+            "group_session": group_session,
         }
     )
 

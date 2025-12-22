@@ -63,5 +63,14 @@
   "ocr": {
     "max_candidates": 3,
     "dedupe_candidates": true
+  },
+  "group_mode": {
+    "enabled": true,
+    "auto_start_on_tag": false,
+    "default_group_id": "",
+    "tag_window_seconds_default": 5.0,
+    "strict_tag_set_default": true,
+    "strict_label_set_default": true,
+    "ocr_labels_mode": "latest_only"
   }
 }
