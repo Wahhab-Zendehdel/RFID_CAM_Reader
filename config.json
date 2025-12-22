@@ -34,5 +34,25 @@
     "output_dir": "submissions",
     "mismatch_severity": "warning",
     "secondary_capture_behavior": "default"
+  },
+  "paper_detection": {
+    "min_area": 2000,
+    "max_area_frac": 0.9,
+    "adaptive_block_size": 31,
+    "adaptive_C": 5,
+    "morph_kernel_size": 5,
+    "min_angle": 70.0,
+    "max_angle": 110.0,
+    "min_std_intensity": 15.0,
+    "disable_std_filter": false,
+    "min_template_score": 1e-6,
+    "retr_mode": "external",
+    "enable_edge_fallback": true,
+    "debug": {
+      "enabled": false,
+      "save_on_fail": true,
+      "max_candidates": 5,
+      "output_dir": "paper_debug"
+    }
   }
 }

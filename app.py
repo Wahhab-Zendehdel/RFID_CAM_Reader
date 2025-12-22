@@ -61,6 +61,26 @@ DEFAULT_APP_CONFIG = {
         "mismatch_severity": "warning",
         "secondary_capture_behavior": "default",
     },
+    "paper_detection": {
+        "min_area": 2000,
+        "max_area_frac": 0.9,
+        "adaptive_block_size": 31,
+        "adaptive_C": 5,
+        "morph_kernel_size": 5,
+        "min_angle": 70.0,
+        "max_angle": 110.0,
+        "min_std_intensity": 15.0,
+        "disable_std_filter": False,
+        "min_template_score": 1e-6,
+        "retr_mode": "external",  # external | list
+        "enable_edge_fallback": True,
+        "debug": {
+            "enabled": False,
+            "save_on_fail": True,
+            "max_candidates": 5,
+            "output_dir": "paper_debug",
+        },
+    },
 }
 
 
@@ -184,11 +204,42 @@ secondary_camera_cfg = APP_CONFIG.get("secondary_camera") or APP_CONFIG.get("cam
 secondary_rtsp_url = _env_str("SECONDARY_RTSP_URL") or _build_rtsp_url(secondary_camera_cfg)
 SECONDARY_CAMERA_ENABLED = bool(secondary_rtsp_url)
 
-MIN_AREA = 3000               # min contour area in FULL resolution
-MAX_AREA_FRAC = 0.10          # max area as fraction of full frame
+paper_detection_cfg = APP_CONFIG.get("paper_detection", {}) or {}
+paper_debug_cfg = paper_detection_cfg.get("debug", {}) or {}
+
+MIN_AREA = float(paper_detection_cfg.get("min_area", 2000))
+MAX_AREA_FRAC = float(paper_detection_cfg.get("max_area_frac", 0.9))
+ADAPTIVE_BLOCK_SIZE = int(paper_detection_cfg.get("adaptive_block_size", 31) or 31)
+if ADAPTIVE_BLOCK_SIZE % 2 == 0:
+    ADAPTIVE_BLOCK_SIZE += 1
+if ADAPTIVE_BLOCK_SIZE < 3:
+    ADAPTIVE_BLOCK_SIZE = 3
+ADAPTIVE_C = float(paper_detection_cfg.get("adaptive_C", 5))
+MORPH_KERNEL_SIZE = int(paper_detection_cfg.get("morph_kernel_size", 5) or 5)
+if MORPH_KERNEL_SIZE < 1:
+    MORPH_KERNEL_SIZE = 1
+MIN_ANGLE = float(paper_detection_cfg.get("min_angle", 70.0))
+MAX_ANGLE = float(paper_detection_cfg.get("max_angle", 110.0))
+MIN_STD_INTENSITY = float(paper_detection_cfg.get("min_std_intensity", 15.0))
+DISABLE_STD_FILTER = bool(paper_detection_cfg.get("disable_std_filter", False))
 MATCH_WIDTH = 300             # mask matching width
-MIN_TM_SCORE = 0.000000000001 # minimal template match score
-COLOR_STD_MIN = 40.0          # reject very uniform patches (e.g. blank)
+MIN_TM_SCORE = float(paper_detection_cfg.get("min_template_score", 1e-6))
+RETR_MODE = str(paper_detection_cfg.get("retr_mode", "external") or "external").strip().lower()
+EDGE_FALLBACK_ENABLED = bool(paper_detection_cfg.get("enable_edge_fallback", True))
+CONTOUR_RETR_MODE = cv2.RETR_EXTERNAL if RETR_MODE == "external" else cv2.RETR_LIST
+
+PAPER_DEBUG_ENABLED = bool(paper_debug_cfg.get("enabled", False))
+PAPER_DEBUG_SAVE_ON_FAIL = bool(paper_debug_cfg.get("save_on_fail", True))
+PAPER_DEBUG_MAX_CANDIDATES = int(paper_debug_cfg.get("max_candidates", 5) or 5)
+PAPER_DEBUG_DIR = Path(_resolve_path(paper_debug_cfg.get("output_dir", "paper_debug")))
+if PAPER_DEBUG_ENABLED:
+    try:
+        PAPER_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        PAPER_DEBUG_ENABLED = False
+        PAPER_DEBUG_SAVE_ON_FAIL = False
+
+COLOR_STD_MIN = MIN_STD_INTENSITY  # legacy compatibility for downstream refs
 
 # OCR / Number Detection Settings
 OCR_MODEL_ID          = "./trocr-large-printed"  # local model dir
@@ -897,6 +948,42 @@ def rfid_listener():
 # Paper detection for ONE frame
 # ============================
 
+
+def _save_debug_image(path: Path, img: np.ndarray) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), img)
+    except Exception:
+        pass
+
+
+def _annotate_candidates(frame: np.ndarray, candidates: list, max_candidates: int, best_idx: int = -1) -> np.ndarray:
+    annotated = frame.copy()
+    for idx, cand in enumerate(candidates[:max_candidates]):
+        quad = cand.get("quad")
+        if quad is None:
+            continue
+        color = (0, 255, 0) if cand.get("accepted") else (0, 165, 255)
+        if idx == best_idx:
+            color = (0, 0, 255)
+        cv2.drawContours(annotated, [quad.astype(int)], -1, color, 3)
+        label = f"{idx+1}:{cand.get('score', -1):.3f}"
+        reason = cand.get("reject_reason") or ""
+        if reason:
+            label += f" {reason}"
+        cv2.putText(annotated, label, tuple(quad[0].astype(int)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+    return annotated
+
+
+def _overlay_text(img: np.ndarray, lines: list) -> np.ndarray:
+    out = img.copy()
+    y = 20
+    for line in lines:
+        cv2.putText(out, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+        y += 18
+    return out
+
+
 def find_best_candidate_single_frame(frame):
     """
     Scan a single frame for the best paper candidate.
@@ -913,61 +1000,144 @@ def find_best_candidate_single_frame(frame):
         255,
         cv2.ADAPTIVE_THRESH_MEAN_C,
         cv2.THRESH_BINARY_INV,
-        31,
-        5
+        ADAPTIVE_BLOCK_SIZE,
+        ADAPTIVE_C
     )
 
-    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE), np.uint8)
     th_closed = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel)
-
-    contours, _ = cv2.findContours(th_closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     best_score = -1.0
     best_quad = None
     best_warped = None
+    candidate_stats = []
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < MIN_AREA:
-            continue
-        if area > MAX_AREA_FRAC * frame_area:
-            continue
+    def process_contours(contours, stage_label: str):
+        nonlocal best_score, best_quad, best_warped
+        for cnt in contours:
+            stats = {"stage": stage_label}
+            area = cv2.contourArea(cnt)
+            stats["area"] = float(area)
+            stats["area_frac"] = float(area / frame_area) if frame_area > 0 else 0.0
+            if area < MIN_AREA:
+                stats["reject_reason"] = "area_small"
+                candidate_stats.append(stats)
+                continue
+            if MAX_AREA_FRAC > 0 and stats["area_frac"] > MAX_AREA_FRAC:
+                stats["reject_reason"] = "area_too_big"
+                candidate_stats.append(stats)
+                continue
 
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) != 4:
-            continue
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
+            stats["approx_len"] = len(approx)
+            if len(approx) != 4:
+                stats["reject_reason"] = "not_quad"
+                candidate_stats.append(stats)
+                continue
 
-        pts = order_points(approx)
+            pts = order_points(approx)
+            stats["quad"] = pts
 
-        if not is_rectangle_by_angles(pts, min_angle=70.0, max_angle=110.0):
-            continue
+            angle_ok = is_rectangle_by_angles(pts, min_angle=MIN_ANGLE, max_angle=MAX_ANGLE)
+            stats["angle_ok"] = angle_ok
+            if not angle_ok:
+                stats["reject_reason"] = "angle"
+                candidate_stats.append(stats)
+                continue
 
-        w_edge = np.linalg.norm(pts[1] - pts[0])
-        h_edge = np.linalg.norm(pts[3] - pts[0])
-        if h_edge == 0:
-            continue
-        aspect = w_edge / h_edge
+            w_edge = np.linalg.norm(pts[1] - pts[0])
+            h_edge = np.linalg.norm(pts[3] - pts[0])
+            if h_edge == 0:
+                stats["reject_reason"] = "degenerate"
+                candidate_stats.append(stats)
+                continue
+            aspect = w_edge / h_edge
+            stats["aspect"] = float(aspect)
 
-        if not (0.5 * mask_aspect <= aspect <= 2.0 * mask_aspect):
-            continue
+            if not (0.5 * mask_aspect <= aspect <= 2.0 * mask_aspect):
+                stats["reject_reason"] = "aspect"
+                candidate_stats.append(stats)
+                continue
 
-        M = cv2.getPerspectiveTransform(pts.astype(np.float32), dest_quad)
-        warped = cv2.warpPerspective(frame, M, (mw, mh))
-        warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+            M = cv2.getPerspectiveTransform(pts.astype(np.float32), dest_quad)
+            warped = cv2.warpPerspective(frame, M, (mw, mh))
+            warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
-        mean_val, std_val = cv2.meanStdDev(warped_gray)
-        std_intensity = float(std_val[0][0])
-        if std_intensity < COLOR_STD_MIN:
-            continue
+            mean_val, std_val = cv2.meanStdDev(warped_gray)
+            std_intensity = float(std_val[0][0])
+            stats["std_intensity"] = std_intensity
+            if not DISABLE_STD_FILTER and std_intensity < MIN_STD_INTENSITY:
+                stats["reject_reason"] = "std_low"
+                candidate_stats.append(stats)
+                continue
 
-        result = cv2.matchTemplate(warped_gray, mask_resized, cv2.TM_CCOEFF_NORMED)
-        _, score, _, _ = cv2.minMaxLoc(result)
+            result = cv2.matchTemplate(warped_gray, mask_resized, cv2.TM_CCOEFF_NORMED)
+            _, score, _, _ = cv2.minMaxLoc(result)
+            stats["score"] = float(score)
 
-        if score > best_score:
-            best_score = score
-            best_quad = pts
-            best_warped = warped
+            if score < MIN_TM_SCORE:
+                stats["reject_reason"] = "score_low"
+                candidate_stats.append(stats)
+                continue
+
+            stats["accepted"] = True
+            candidate_stats.append(stats)
+
+            if score > best_score:
+                best_score = score
+                best_quad = pts
+                best_warped = warped
+
+    contours, _ = cv2.findContours(th_closed, CONTOUR_RETR_MODE, cv2.CHAIN_APPROX_SIMPLE)
+    process_contours(contours, "adaptive")
+
+    if best_quad is None and EDGE_FALLBACK_ENABLED:
+        edges = cv2.Canny(blur_gray, 40, 120)
+        edges = cv2.dilate(edges, np.ones((3, 3), np.uint8))
+        edge_contours, _ = cv2.findContours(edges, CONTOUR_RETR_MODE, cv2.CHAIN_APPROX_SIMPLE)
+        process_contours(edge_contours, "edge")
+
+    debug_needed = PAPER_DEBUG_ENABLED and (PAPER_DEBUG_SAVE_ON_FAIL or best_quad is not None)
+    if debug_needed:
+        ts_label = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        sorted_candidates = sorted(candidate_stats, key=lambda c: c.get("score", -1), reverse=True)
+        best_idx = -1
+        if best_quad is not None:
+            for idx, cand in enumerate(sorted_candidates):
+                cq = cand.get("quad")
+                if cq is not None and np.allclose(cq, best_quad):
+                    best_idx = idx
+                    break
+
+        annotated = _annotate_candidates(frame, sorted_candidates, PAPER_DEBUG_MAX_CANDIDATES, best_idx)
+        _save_debug_image(PAPER_DEBUG_DIR / f"{ts_label}_gray.jpg", gray)
+        _save_debug_image(PAPER_DEBUG_DIR / f"{ts_label}_th.jpg", th)
+        _save_debug_image(PAPER_DEBUG_DIR / f"{ts_label}_th_closed.jpg", th_closed)
+        _save_debug_image(PAPER_DEBUG_DIR / f"{ts_label}_annotated.jpg", annotated)
+
+        if best_warped is not None:
+            lines = [
+                f"score={best_score:.4f}",
+            ]
+            bw_with_text = _overlay_text(best_warped, lines)
+            _save_debug_image(PAPER_DEBUG_DIR / f"{ts_label}_best_warp.jpg", bw_with_text)
+
+        reason_counts = {}
+        for c in candidate_stats:
+            reason = c.get("reject_reason") or ("accepted" if c.get("accepted") else "unknown")
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        print(f"[paper_debug] candidates={len(candidate_stats)} best_score={best_score:.4f} reasons={reason_counts}")
+        _append_event(
+            {
+                "type": "paper_debug",
+                "time": time.time(),
+                "time_iso": _utc_iso(time.time()),
+                "best_score": best_score,
+                "candidate_count": len(candidate_stats),
+                "reason_counts": reason_counts,
+            }
+        )
 
     if best_quad is None or best_score < MIN_TM_SCORE:
         return None, None, -1.0
@@ -1176,6 +1346,26 @@ if ocr_device.type == "cuda":
 # Capture + process helper
 # ============================
 
+
+def _get_latest_frame_for_capture(request_after_ts: float = None, max_wait: float = 0.3):
+    """
+    Try to fetch the freshest frame, waiting briefly if the current frame predates the RFID event.
+    """
+    start = time.time()
+    last_ts = None
+    while True:
+        with frame_lock:
+            frame = latest_frame.copy() if latest_frame is not None else None
+        with state_lock:
+            last_ts = camera_status.get("last_frame_time")
+        if frame is not None:
+            if request_after_ts is None or (last_ts and last_ts >= request_after_ts):
+                return frame, last_ts
+        if time.time() - start >= max_wait:
+            return frame, last_ts
+        time.sleep(0.03)
+
+
 def grab_and_process():
     """
     Use the latest frame from RTSP, detect paper, run OCR.
@@ -1186,20 +1376,27 @@ def grab_and_process():
     if not CAMERA_ENABLED:
         return False, "Camera not configured", None, None, None
 
-    with frame_lock:
-        if latest_frame is None:
-            cam_err = ""
-            with state_lock:
-                cam_err = camera_status.get("last_error") or ""
-            if cam_err:
-                return False, cam_err, None, None, None
-            return False, "No frame available yet", None, None, None
-        frame = latest_frame.copy()
+    with state_lock:
+        detection_ts = rfid_status.get("last_tag_time")
+
+    frame, frame_ts = _get_latest_frame_for_capture(request_after_ts=detection_ts, max_wait=0.35)
+    if frame is None:
+        cam_err = ""
+        with state_lock:
+            cam_err = camera_status.get("last_error") or ""
+        if cam_err:
+            return False, cam_err, None, None, None
+        return False, "No frame available yet", None, None, None
+
+    frame_stale = bool(detection_ts and frame_ts and frame_ts < detection_ts)
 
     quad, warped, score = find_best_candidate_single_frame(frame)
     if quad is None:
         annotated = frame.copy()
-        return False, "No paper detected", None, annotated, None
+        msg = "No paper detected"
+        if frame_stale:
+            msg += " (frame predates RFID event)"
+        return False, msg, None, annotated, None
 
     text = recognize_text_from_np(
         warped,
@@ -1215,7 +1412,10 @@ def grab_and_process():
     annotated = frame.copy()
     cv2.drawContours(annotated, [quad.astype(int)], -1, (0, 255, 0), 3)
 
-    return True, "OK", text, annotated, warped
+    msg = "OK"
+    if frame_stale:
+        msg += " (frame predates RFID event)"
+    return True, msg, text, annotated, warped
 
 
 def img_to_base64_jpeg(img_bgr: np.ndarray) -> str:
