@@ -530,15 +530,6 @@ with tag_labels_lock:
         except Exception:
             pass
 
-with state_lock:
-    groups_data = _load_groups_from_disk()
-    if not GROUPS_PATH.exists():
-        try:
-            _save_groups_to_disk(groups_data)
-        except Exception:
-            pass
-
-
 def _tag_label_map() -> dict:
     with tag_labels_lock:
         return dict(tag_labels_data.get("tag_to_label") or {})
@@ -595,6 +586,14 @@ active_group_session = {
     "tag_window_seconds": GROUP_TAG_WINDOW_DEFAULT,
     "state": "idle",
 }
+
+with state_lock:
+    groups_data = _load_groups_from_disk()
+    if not GROUPS_PATH.exists():
+        try:
+            _save_groups_to_disk(groups_data)
+        except Exception:
+            pass
 
 event_log = []
 EVENT_LOG_MAX = 50
