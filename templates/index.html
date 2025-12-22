@@ -25,11 +25,11 @@
       font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       background: var(--bg);
       color: var(--text);
-      overflow: hidden; /* fixed layout, no page scroll */
+      overflow: auto;
     }
 
     .app {
-      height: 100vh;
+      min-height: 100vh;
       padding: 14px;
       display: flex;
       flex-direction: column;
@@ -101,7 +101,7 @@
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 12px;
-      overflow: hidden;
+      overflow: auto;
     }
 
     .tab-panel {
@@ -270,25 +270,9 @@
     .capture-layout {
       flex: 1 1 auto;
       min-height: 0;
-      display: grid;
-      grid-template-columns: minmax(320px, 1fr) minmax(320px, 520px);
-      grid-auto-rows: auto;
-      align-items: start;
+      display: flex;
+      flex-direction: column;
       gap: 12px;
-    }
-
-    .capture-top {
-      min-height: 0;
-      display: grid;
-      grid-template-columns: 360px 1fr;
-      gap: 12px;
-      grid-column: 1 / 2;
-    }
-
-    .events-panel {
-      grid-column: 2 / 3;
-      grid-row: 1 / 2;
-      min-height: 0;
     }
 
     .kv {
@@ -394,12 +378,23 @@
     }
 
     @media (max-width: 980px) {
-      .capture-layout { grid-template-columns: 1fr; }
-      .capture-top { grid-template-columns: 1fr; grid-column: 1 / 2; }
-      .events-panel { grid-column: 1 / 2; grid-row: auto; }
       .images { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
       .kv { grid-template-columns: 120px 1fr; }
     }
+
+    details.panel {
+      padding-top: 6px;
+    }
+    details summary {
+      cursor: pointer;
+      font-weight: 700;
+      color: var(--text);
+      list-style: none;
+      outline: none;
+      margin-bottom: 6px;
+    }
+    details summary::-webkit-details-marker { display: none; }
+    details .kv { margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -439,52 +434,54 @@
 
       <section class="tab-panel" id="tab-capture">
         <div class="capture-layout">
-          <div class="capture-top">
-            <div class="panel">
-              <div class="hint" id="approved-count">Approved tags: 0</div>
-              <div class="kv" style="margin-top: 10px;">
-                <div class="k">Last RFID tag</div><div class="v" id="last-tag">-</div>
-                <div class="k">Approved</div><div class="v" id="last-approved">-</div>
+          <div class="panel">
+            <div class="hint" id="approved-count">Approved tags: 0</div>
+            <div class="kv" style="margin-top: 10px;">
+              <div class="k">Last RFID tag</div><div class="v" id="last-tag">-</div>
+              <div class="k">Approved</div><div class="v" id="last-approved">-</div>
+              <div class="k">For tag</div><div class="v" id="cap-tag">-</div>
+              <div class="k">Expected</div><div class="v" id="cap-expected">-</div>
+              <div class="k">Observed</div><div class="v" id="cap-observed">-</div>
+              <div class="k">Match status</div><div class="v" id="cap-match">-</div>
+              <div class="k">Attempt</div><div class="v" id="cap-attempt">0 / -</div>
+              <div class="k">Message</div><div class="v" id="cap-msg">-</div>
+            </div>
+
+            <div class="alert muted" id="cap-banner" aria-live="polite">Waiting for approved RFID tag...</div>
+            <div class="number" id="cap-number">-----</div>
+            <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
+            <div class="row" style="margin-top: 6px;">
+              <button class="primary" id="submit-btn" type="button" disabled>Submit capture</button>
+              <div class="hint" id="submit-status">Capture must succeed before submit.</div>
+            </div>
+
+            <div class="images" style="margin-top: 12px;">
+              <div class="image-box">
+                <div class="image-title" id="title-original">Original (outline)</div>
+                <div class="imgwrap"><img id="img-original" alt="Original frame" /></div>
+              </div>
+              <div class="image-box">
+                <div class="image-title" id="title-paper">Warped paper</div>
+                <div class="imgwrap"><img id="img-paper" alt="Warped paper" /></div>
+              </div>
+              <div class="image-box">
+                <div class="image-title" id="title-secondary">Secondary camera</div>
+                <div class="imgwrap"><img id="img-secondary" alt="Secondary camera frame" /></div>
+              </div>
+            </div>
+
+            <details class="panel" style="margin-top: 12px;">
+              <summary>Show details</summary>
+              <div class="kv">
                 <div class="k">Queue</div><div class="v" id="queue-size">0</div>
                 <div class="k">Capture</div><div class="v" id="cap-state">idle</div>
-                <div class="k">For tag</div><div class="v" id="cap-tag">-</div>
-                <div class="k">Attempt</div><div class="v" id="cap-attempt">0 / -</div>
                 <div class="k">Attempt reset</div><div class="v" id="cap-attempt-reset">-</div>
                 <div class="k">Secondary mode</div><div class="v" id="cap-secondary-mode">-</div>
-                <div class="k">Expected</div><div class="v" id="cap-expected">-</div>
-                <div class="k">Observed</div><div class="v" id="cap-observed">-</div>
-                <div class="k">Match status</div><div class="v" id="cap-match">-</div>
-                <div class="k">Message</div><div class="v" id="cap-msg">-</div>
               </div>
-
-              <div class="alert muted" id="cap-banner" aria-live="polite">Waiting for approved RFID tag...</div>
-              <div class="number" id="cap-number">-----</div>
-              <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
-              <div class="row" style="margin-top: 6px;">
-                <button class="primary" id="submit-btn" type="button" disabled>Submit capture</button>
-                <div class="hint" id="submit-status">Capture must succeed before submit.</div>
-              </div>
-            </div>
-
-            <div class="panel" style="min-height: 0;">
-              <div class="images">
-                <div class="image-box">
-                  <div class="image-title" id="title-original">Original (outline)</div>
-                  <div class="imgwrap"><img id="img-original" alt="Original frame" /></div>
-                </div>
-                <div class="image-box">
-                  <div class="image-title" id="title-paper">Warped paper</div>
-                  <div class="imgwrap"><img id="img-paper" alt="Warped paper" /></div>
-                </div>
-                <div class="image-box">
-                  <div class="image-title" id="title-secondary">Secondary camera</div>
-                  <div class="imgwrap"><img id="img-secondary" alt="Secondary camera frame" /></div>
-                </div>
-              </div>
-            </div>
+            </details>
           </div>
 
-          <div class="panel events-panel">
+          <div class="panel">
             <div class="hint" style="margin-bottom: 8px;">Recent events</div>
             <table>
               <thead>
