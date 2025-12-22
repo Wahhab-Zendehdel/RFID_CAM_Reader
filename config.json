@@ -54,5 +54,14 @@
       "max_candidates": 5,
       "output_dir": "paper_debug"
     }
+  },
+  "multi_tag": {
+    "enabled": true,
+    "active_tag_ttl_seconds": 5.0,
+    "increment_attempt_for": "unresolved_only"
+  },
+  "ocr": {
+    "max_candidates": 3,
+    "dedupe_candidates": true
   }
 }
