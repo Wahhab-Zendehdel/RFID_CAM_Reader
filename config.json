@@ -28,7 +28,8 @@
     "single_shot_per_detection": true,
     "max_attempts": 5,
     "attempt_reset_mode": "every_detection",
-    "secondary_snapshot_mode": "on_success"
+    "secondary_snapshot_mode": "on_success",
+    "retry_tag_max_age_seconds": 3.0
   },
   "storage": {
     "output_dir": "submissions",

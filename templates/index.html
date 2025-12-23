@@ -283,6 +283,59 @@
       overflow: hidden;
     }
 
+    .groups-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .group-list {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      min-height: 120px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+
+    .group-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .group-item:last-child { border-bottom: 0; }
+
+    .group-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .pair-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .pair-table th, .pair-table td {
+      padding: 6px;
+      border-top: 1px solid var(--border);
+      vertical-align: middle;
+    }
+
+    .pair-table input {
+      width: 100%;
+      padding: 8px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.04);
+      color: var(--text);
+      font-size: 12px;
+    }
+
     .chip button {
       border: 0;
       background: rgba(255, 255, 255, 0.08);
@@ -463,6 +516,58 @@
           <div class="hint" style="margin-bottom: 10px;">Approved tag list (stored in <code>approved_tags.json</code>)</div>
           <div class="tag-grid" id="tags"></div>
         </div>
+
+        <div class="panel">
+          <div class="hint" style="margin-bottom: 8px;">Groups</div>
+          <div class="groups-grid">
+            <div>
+              <div class="group-list" id="group-list"></div>
+            </div>
+            <div>
+              <div class="row">
+                <input id="group-name" type="text" placeholder="Group name" />
+                <input id="group-id" type="text" placeholder="Group ID (e.g., G-001)" />
+              </div>
+              <div class="row" style="margin-top: 8px;">
+                <label style="display:flex; gap:6px; align-items:center; font-size:12px;">
+                  <input type="checkbox" id="group-enabled" checked /> Enabled
+                </label>
+                <input id="group-tag-window" type="text" placeholder="Tag window seconds" value="5.0" />
+                <label style="display:flex; gap:6px; align-items:center; font-size:12px;">
+                  <input type="checkbox" id="group-strict-tags" checked /> Strict tags
+                </label>
+                <label style="display:flex; gap:6px; align-items:center; font-size:12px;">
+                  <input type="checkbox" id="group-strict-labels" checked /> Strict labels
+                </label>
+              </div>
+
+              <div class="row" style="margin-top: 8px;">
+                <select id="group-add-tag" style="flex:1 1 auto; padding:10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
+                  <option value="">Add from approved tags...</option>
+                </select>
+                <button class="secondary" id="group-add-tag-btn" type="button">Add Tag</button>
+              </div>
+
+              <table class="pair-table" style="margin-top: 8px;">
+                <thead>
+                  <tr>
+                    <th>Tag</th>
+                    <th>Label</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="group-pairs-body"></tbody>
+              </table>
+
+              <div class="row" style="margin-top: 8px;">
+                <button class="secondary" id="group-add-row" type="button">Add Row</button>
+                <button class="primary" id="group-save" type="button">Create Group</button>
+                <button class="secondary" id="group-new" type="button">New</button>
+              </div>
+              <div class="status" id="group-editor-status"></div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="tab-panel" id="tab-capture">
@@ -616,6 +721,20 @@
     const groupStopBtn = document.getElementById("group-stop-btn");
     const groupStatus = document.getElementById("group-status");
     const groupSetsSummary = document.getElementById("group-sets-summary");
+    const groupList = document.getElementById("group-list");
+    const groupNameInput = document.getElementById("group-name");
+    const groupIdInput = document.getElementById("group-id");
+    const groupEnabledInput = document.getElementById("group-enabled");
+    const groupTagWindowInput = document.getElementById("group-tag-window");
+    const groupStrictTagsInput = document.getElementById("group-strict-tags");
+    const groupStrictLabelsInput = document.getElementById("group-strict-labels");
+    const groupAddTagSelect = document.getElementById("group-add-tag");
+    const groupAddTagBtn = document.getElementById("group-add-tag-btn");
+    const groupPairsBody = document.getElementById("group-pairs-body");
+    const groupAddRowBtn = document.getElementById("group-add-row");
+    const groupSaveBtn = document.getElementById("group-save");
+    const groupNewBtn = document.getElementById("group-new");
+    const groupEditorStatus = document.getElementById("group-editor-status");
 
     let activeTab = "tags";
     let pollInFlight = false;
@@ -626,6 +745,9 @@
     const LISTEN_DEBOUNCE_SECONDS = 1.0;
     let lastCaptureStatus = {};
     let groupsCache = [];
+    let approvedTagEntries = [];
+    let tagLabelMap = {};
+    let editingGroupId = "";
     function buildActiveTags(c) {
       if (Array.isArray(c.active_tags) && c.active_tags.length) return c.active_tags;
       const legacyTag = c.tag || "";
@@ -730,6 +852,11 @@
 
     function renderTags(resp) {
       const entries = extractTagEntries(resp);
+      approvedTagEntries = entries;
+      tagLabelMap = {};
+      entries.forEach((e) => {
+        if (e.tag) tagLabelMap[e.tag] = e.label || "";
+      });
       const MAX_RENDER = 50;
       const shown = entries.slice(0, MAX_RENDER);
       tagsContainer.innerHTML = "";
@@ -821,6 +948,14 @@
 
       const extra = entries.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${entries.length})` : "";
       tagsMeta.textContent = `Approved tags: ${entries.length}${extra}`;
+
+      groupAddTagSelect.innerHTML = '<option value="">Add from approved tags...</option>';
+      for (const entry of entries) {
+        const opt = document.createElement("option");
+        opt.value = entry.tag;
+        opt.textContent = entry.tag;
+        groupAddTagSelect.appendChild(opt);
+      }
     }
 
     async function refreshTags() {
@@ -877,6 +1012,7 @@
           opt.textContent = `${g.group_id || ""} ${g.name ? "- " + g.name : ""}`.trim();
           groupSelect.appendChild(opt);
         }
+        renderGroupList();
       } catch (e) {
         groupStatus.textContent = `Failed to load groups: ${String(e.message || e)}`;
       }
@@ -913,6 +1049,208 @@
 
     groupStartBtn.addEventListener("click", startGroup);
     groupStopBtn.addEventListener("click", stopGroup);
+
+    function renderGroupList() {
+      groupList.innerHTML = "";
+      if (!groupsCache.length) {
+        groupList.innerHTML = '<div class="hint">No groups yet.</div>';
+        return;
+      }
+      for (const g of groupsCache) {
+        const item = document.createElement("div");
+        item.className = "group-item";
+        const info = document.createElement("div");
+        info.textContent = `${g.group_id || ""} ${g.name ? "- " + g.name : ""} (${(g.required_pairs || []).length} pairs)`;
+        const actions = document.createElement("div");
+        actions.className = "group-actions";
+        const enabled = document.createElement("input");
+        enabled.type = "checkbox";
+        enabled.checked = g.enabled !== false;
+        enabled.title = "Enabled";
+        enabled.addEventListener("change", async () => {
+          const payload = { ...g, enabled: enabled.checked };
+          try {
+            await fetchJson(`/api/groups/${encodeURIComponent(g.group_id)}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            await loadGroups();
+          } catch (e) {
+            groupEditorStatus.textContent = `Failed to update: ${String(e.message || e)}`;
+          }
+        });
+        const edit = document.createElement("button");
+        edit.className = "secondary";
+        edit.type = "button";
+        edit.textContent = "Edit";
+        edit.addEventListener("click", () => setGroupEditor(g));
+        const del = document.createElement("button");
+        del.className = "secondary";
+        del.type = "button";
+        del.textContent = "Delete";
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete group ${g.group_id}?`)) return;
+          try {
+            await fetchJson(`/api/groups/${encodeURIComponent(g.group_id)}`, { method: "DELETE" });
+            if (editingGroupId === g.group_id) clearGroupEditor();
+            await loadGroups();
+          } catch (e) {
+            groupEditorStatus.textContent = `Failed to delete: ${String(e.message || e)}`;
+          }
+        });
+        actions.appendChild(enabled);
+        actions.appendChild(edit);
+        actions.appendChild(del);
+        item.appendChild(info);
+        item.appendChild(actions);
+        groupList.appendChild(item);
+      }
+    }
+
+    function addPairRow(tagVal = "", labelVal = "") {
+      const tr = document.createElement("tr");
+      const tdTag = document.createElement("td");
+      const tdLabel = document.createElement("td");
+      const tdRemove = document.createElement("td");
+      const tagInput = document.createElement("input");
+      tagInput.type = "text";
+      tagInput.value = tagVal;
+      const labelInput = document.createElement("input");
+      labelInput.type = "text";
+      labelInput.maxLength = 5;
+      labelInput.value = labelVal;
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "secondary";
+      removeBtn.type = "button";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => tr.remove());
+      tdTag.appendChild(tagInput);
+      tdLabel.appendChild(labelInput);
+      tdRemove.appendChild(removeBtn);
+      tr.append(tdTag, tdLabel, tdRemove);
+      groupPairsBody.appendChild(tr);
+    }
+
+    function clearGroupEditor() {
+      editingGroupId = "";
+      groupNameInput.value = "";
+      groupIdInput.value = "";
+      groupIdInput.disabled = false;
+      groupEnabledInput.checked = true;
+      groupTagWindowInput.value = "5.0";
+      groupStrictTagsInput.checked = true;
+      groupStrictLabelsInput.checked = true;
+      groupPairsBody.innerHTML = "";
+      groupSaveBtn.textContent = "Create Group";
+      groupEditorStatus.textContent = "";
+    }
+
+    function setGroupEditor(g) {
+      editingGroupId = g.group_id || "";
+      groupNameInput.value = g.name || "";
+      groupIdInput.value = g.group_id || "";
+      groupIdInput.disabled = true;
+      groupEnabledInput.checked = g.enabled !== false;
+      const settings = g.settings || {};
+      groupTagWindowInput.value = settings.tag_window_seconds ?? 5.0;
+      groupStrictTagsInput.checked = settings.strict_tag_set !== false;
+      groupStrictLabelsInput.checked = settings.strict_label_set !== false;
+      groupPairsBody.innerHTML = "";
+      (g.required_pairs || []).forEach((p) => addPairRow(p.tag || "", p.label || ""));
+      groupSaveBtn.textContent = "Update Group";
+      groupEditorStatus.textContent = "";
+    }
+
+    function generateGroupId() {
+      let max = 0;
+      groupsCache.forEach((g) => {
+        const m = String(g.group_id || "").match(/G-(\d+)/);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      });
+      return `G-${String(max + 1).padStart(3, "0")}`;
+    }
+
+    function collectPairs() {
+      const pairs = [];
+      const tags = new Set();
+      const labels = new Set();
+      let error = "";
+      groupPairsBody.querySelectorAll("tr").forEach((tr) => {
+        const inputs = tr.querySelectorAll("input");
+        const tagVal = (inputs[0].value || "").trim().toUpperCase();
+        const labelVal = (inputs[1].value || "").trim();
+        if (!tagVal && !labelVal) return;
+        if (!tagVal) error = "Tag is required for each pair.";
+        if (!/^\d{5}$/.test(labelVal)) error = "Label must be exactly 5 digits.";
+        if (tags.has(tagVal)) error = "Duplicate tag in group.";
+        if (labels.has(labelVal)) error = "Duplicate label in group.";
+        tags.add(tagVal);
+        labels.add(labelVal);
+        pairs.push({ tag: tagVal, label: labelVal });
+      });
+      if (!pairs.length) error = "Group must have at least one pair.";
+      return { pairs, error };
+    }
+
+    async function saveGroup() {
+      groupEditorStatus.textContent = "";
+      const name = groupNameInput.value.trim();
+      let groupId = groupIdInput.value.trim();
+      if (!groupId) {
+        groupId = generateGroupId();
+        groupIdInput.value = groupId;
+      }
+      const enabled = !!groupEnabledInput.checked;
+      const tagWindow = parseFloat(groupTagWindowInput.value || "5.0");
+      const strictTags = !!groupStrictTagsInput.checked;
+      const strictLabels = !!groupStrictLabelsInput.checked;
+      const { pairs, error } = collectPairs();
+      if (error) {
+        groupEditorStatus.textContent = error;
+        return;
+      }
+      const payload = {
+        group_id: groupId,
+        name,
+        enabled,
+        required_pairs: pairs,
+        settings: {
+          tag_window_seconds: tagWindow,
+          strict_tag_set: strictTags,
+          strict_label_set: strictLabels,
+        },
+      };
+      try {
+        if (editingGroupId) {
+          await fetchJson(`/api/groups/${encodeURIComponent(editingGroupId)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          groupEditorStatus.textContent = "Group updated.";
+        } else {
+          await fetchJson("/api/groups", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          groupEditorStatus.textContent = "Group created.";
+        }
+        await loadGroups();
+      } catch (e) {
+        groupEditorStatus.textContent = `Save failed: ${String(e.message || e)}`;
+      }
+    }
+
+    groupAddRowBtn.addEventListener("click", () => addPairRow());
+    groupNewBtn.addEventListener("click", clearGroupEditor);
+    groupSaveBtn.addEventListener("click", saveGroup);
+    groupAddTagBtn.addEventListener("click", () => {
+      const tag = groupAddTagSelect.value;
+      if (!tag) return;
+      addPairRow(tag, tagLabelMap[tag] || "");
+    });
 
     async function submitCapture() {
       submitBtn.disabled = true;
@@ -1152,7 +1490,23 @@
             retryBtn.disabled = true;
           }
         }
-        const retryEnabled = !!(retryTag && state !== "running" && !disableForAttempts);
+        const retryMaxAge = Number(c.retry_tag_max_age_seconds || 3);
+        let recentSingle = false;
+        if (retryTag) {
+          const match = activeList.find((t) => t.tag === retryTag);
+          if (match && match.last_seen && data.server_time) {
+            recentSingle = (data.server_time - match.last_seen) <= retryMaxAge;
+          }
+        }
+        let groupValid = false;
+        if (data.group_session && data.group_session.group_id) {
+          const seen = data.group_session.seen_tags || {};
+          const window = Number(data.group_session.tag_window_seconds || 5);
+          const nowTs = data.server_time || (Date.now() / 1000);
+          const seenTags = Object.entries(seen).filter(([, ts]) => (nowTs - Number(ts || 0)) <= window);
+          groupValid = seenTags.length > 0;
+        }
+        const retryEnabled = !!((recentSingle || groupValid) && state !== "running" && !disableForAttempts);
         retryBtn.disabled = !retryEnabled;
 
         const savedPath = c.submitted_path || "";

@@ -55,6 +55,7 @@ DEFAULT_APP_CONFIG = {
         "max_attempts": 5,
         "attempt_reset_mode": "every_detection",  # every_detection | per_tag_session
         "secondary_snapshot_mode": "on_success",  # on_success | on_every_detection
+        "retry_tag_max_age_seconds": 3.0,
     },
     "storage": {
         "output_dir": "submissions",
@@ -296,6 +297,7 @@ CAPTURE_TIMEOUT_SECONDS = _env_float("CAPTURE_TIMEOUT_SECONDS") or float(capture
 TARGET_DIGITS = int(capture_cfg.get("target_digits") or 5)
 CAPTURE_SINGLE_SHOT = bool(capture_cfg.get("single_shot_per_detection", True))
 CAPTURE_MAX_ATTEMPTS = max(1, int(capture_cfg.get("max_attempts") or 5))
+RETRY_TAG_MAX_AGE_SECONDS = float(capture_cfg.get("retry_tag_max_age_seconds", 3.0))
 ATTEMPT_RESET_MODE = str(capture_cfg.get("attempt_reset_mode") or "every_detection").strip().lower()
 if ATTEMPT_RESET_MODE not in {"every_detection", "per_tag_session"}:
     ATTEMPT_RESET_MODE = "every_detection"
@@ -637,6 +639,7 @@ capture_status = {
     "active_tags": [],
     "mismatches": [],
     "group": {},
+    "retry_tag_max_age_seconds": RETRY_TAG_MAX_AGE_SECONDS,
 }
 
 
@@ -2463,6 +2466,9 @@ def api_submit_capture():
 
     if not capture.get("awaiting_submit"):
         return jsonify({"success": False, "message": "No capture awaiting submit"}), 400
+    group = capture.get("group") or {}
+    if group.get("group_id") and not group.get("matched", False):
+        return jsonify({"success": False, "message": "Group mismatch; cannot submit."}), 409
     if not capture.get("number"):
         return jsonify({"success": False, "message": "No number captured"}), 400
 
@@ -2540,21 +2546,52 @@ def api_capture_retry():
     req_tag = (payload.get("tag") or "").strip()
     reason = (payload.get("reason") or "operator_retry").strip() or "operator_retry"
 
+    now = time.time()
     with state_lock:
         current_state = capture_status.get("state") or ""
         current_tag = capture_status.get("tag") or ""
         current_attempt = int(capture_status.get("attempt") or 0)
         active_list = list(active_tags.keys())
+        active_snapshot = {k: dict(v) for k, v in active_tags.items()}
+        group_snapshot = dict(active_group_session)
 
-    tag = req_tag or (active_list[0] if active_list else current_tag)
-    tag_norm = _normalize_tag(tag)
-    if not tag_norm:
-        return jsonify({"success": False, "message": "No active tag to retry"}), 400
+    valid_group_tags = []
+    if group_snapshot.get("group_id"):
+        window = float(group_snapshot.get("tag_window_seconds") or GROUP_TAG_WINDOW_DEFAULT)
+        seen = group_snapshot.get("seen_tags") or {}
+        valid_group_tags = [t for t, ts in seen.items() if now - float(ts or 0) <= window]
+
+    chosen_tag = ""
+    if req_tag:
+        tag_norm = _normalize_tag(req_tag)
+        info = active_snapshot.get(tag_norm) or {}
+        if info and now - float(info.get("last_seen") or 0) <= RETRY_TAG_MAX_AGE_SECONDS:
+            chosen_tag = tag_norm
+        elif tag_norm in valid_group_tags:
+            chosen_tag = tag_norm
+    if not chosen_tag and current_tag:
+        tag_norm = _normalize_tag(current_tag)
+        info = active_snapshot.get(tag_norm) or {}
+        if info and now - float(info.get("last_seen") or 0) <= RETRY_TAG_MAX_AGE_SECONDS:
+            chosen_tag = tag_norm
+    if not chosen_tag and valid_group_tags:
+        chosen_tag = _normalize_tag(valid_group_tags[0])
+
+    if not chosen_tag:
+        _append_event(
+            {
+                "type": "retry_blocked",
+                "time": now,
+                "time_iso": _utc_iso(now),
+                "reason": "no_active_tag",
+            }
+        )
+        return jsonify({"ok": False, "error": "no_active_tag", "message": "No active tag/group context. Scan a tag first."}), 409
 
     if current_state == "running":
         return jsonify({"success": False, "message": "Capture already running"}), 409
 
-    next_attempt = _next_attempt_for_tag(tag_norm)
+    next_attempt = _next_attempt_for_tag(chosen_tag)
     if ATTEMPT_RESET_MODE == "per_tag_session" and next_attempt > CAPTURE_MAX_ATTEMPTS:
         return jsonify(
             {
@@ -2565,11 +2602,11 @@ def api_capture_retry():
             }
         ), 409
 
-    ok, msg = _enqueue_retry(tag_norm, reason)
+    ok, msg = _enqueue_retry(chosen_tag, reason)
     if not ok:
         return jsonify({"success": False, "message": msg}), 409
 
-    return jsonify({"success": True, "tag": tag_norm, "attempt": next_attempt})
+    return jsonify({"success": True, "tag": chosen_tag, "attempt": next_attempt})
 
 
 @app.route("/capture")
