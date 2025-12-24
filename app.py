@@ -25,31 +25,75 @@ BASE_DIR = Path(__file__).resolve().parent
 APP_CONFIG_PATH = BASE_DIR / "config.json"
 
 DEFAULT_APP_CONFIG = {
+    "auto_fill_missing": False,
+    "app": {
+        "host": "0.0.0.0",
+        "port": 5000,
+        "debug": False,
+    },
     "camera": {
+        "index": None,
         "host": "192.168.1.3",
         "port": 554,
         "username": "user1",
         "password": "Admin123456",
         "path": "/live/0/main",
         "rtsp_url": "",
+        "width": None,
+        "height": None,
+        "fps": None,
+        "auto_exposure": None,
+        "exposure": None,
     },
     "secondary_camera": {
+        "index": None,
         "host": "192.168.1.4",
         "port": 554,
         "username": "user1",
+        "password": "",
         "path": "/live/0/main",
         "rtsp_url": "",
+        "width": None,
+        "height": None,
+        "fps": None,
+        "auto_exposure": None,
+        "exposure": None,
     },
     "rfid": {
         "host": "192.168.1.2",
         "port": 6000,
         "reconnect_seconds": 2.0,
         "debounce_seconds": 1.0,
+        "present_window_seconds": 2.0,
+        "queue_maxsize": 50,
+    },
+    "timing": {
+        "tag_cooldown_seconds": 3.0,
+        "tag_submit_cooldown_seconds": 300.0,
     },
     "capture": {
         "retry_interval_seconds": 0.4,
         "timeout_seconds": 30.0,
         "target_digits": 5,
+        "require_label_match_for_submit": True,
+    },
+    "paper_detection": {
+        "mask_path": "Mask.png",
+        "min_area": 3000,
+        "max_area_frac": 0.1,
+        "match_width": 300,
+        "min_tm_score": 1e-12,
+        "color_std_min": 40.0,
+    },
+    "ocr": {
+        "model_id": "./trocr-large-printed",
+        "center_crop_ratio": 0.8,
+        "band_height_ratio": 0.5,
+        "digits_only": True,
+    },
+    "ui": {
+        "beep_on_detection_default": False,
+        "poll_interval_ms": 1000,
     },
 }
 
@@ -67,12 +111,19 @@ def _load_app_config() -> dict:
     cfg = json.loads(json.dumps(DEFAULT_APP_CONFIG))
 
     if APP_CONFIG_PATH.exists():
+        auto_fill = False
         try:
             raw = json.loads(APP_CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
+                auto_fill = bool(raw.get("auto_fill_missing"))
                 _deep_update(cfg, raw)
         except Exception:
             pass
+        if auto_fill:
+            try:
+                APP_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+            except Exception:
+                pass
         return cfg
 
     try:
@@ -145,40 +196,69 @@ def _build_rtsp_url(camera_cfg: dict) -> str:
 # Settings / Parameters
 # ============================
 
-mask_path = _resolve_path(APP_CONFIG.get("mask_path", "Mask.png"))
-rtsp_url = _env_str("RTSP_URL") or _env_str("CAMERA_RTSP_URL") or _build_rtsp_url(APP_CONFIG.get("camera", {}))
-CAMERA_ENABLED = bool(rtsp_url)
-
+app_cfg = APP_CONFIG.get("app", {})
+ui_cfg = APP_CONFIG.get("ui", {})
+paper_cfg = APP_CONFIG.get("paper_detection", {})
+ocr_cfg = APP_CONFIG.get("ocr", {})
+camera_cfg = APP_CONFIG.get("camera", {})
 secondary_camera_cfg = APP_CONFIG.get("secondary_camera") or APP_CONFIG.get("camera2") or {}
-secondary_rtsp_url = _env_str("SECONDARY_RTSP_URL") or _build_rtsp_url(secondary_camera_cfg)
-SECONDARY_CAMERA_ENABLED = bool(secondary_rtsp_url)
+rfid_cfg = APP_CONFIG.get("rfid", {})
+capture_cfg = APP_CONFIG.get("capture", {})
+timing_cfg = APP_CONFIG.get("timing", {})
 
-MIN_AREA = 3000               # min contour area in FULL resolution
-MAX_AREA_FRAC = 0.10          # max area as fraction of full frame
-MATCH_WIDTH = 300             # mask matching width
-MIN_TM_SCORE = 0.000000000001 # minimal template match score
-COLOR_STD_MIN = 40.0          # reject very uniform patches (e.g. blank)
+mask_path = _resolve_path(paper_cfg.get("mask_path") or APP_CONFIG.get("mask_path", "Mask.png"))
+rtsp_url = _env_str("RTSP_URL") or _env_str("CAMERA_RTSP_URL") or _build_rtsp_url(camera_cfg)
+camera_index = camera_cfg.get("index")
+CAMERA_SOURCE = None
+if rtsp_url:
+    CAMERA_SOURCE = rtsp_url
+elif camera_index is not None:
+    try:
+        CAMERA_SOURCE = int(camera_index)
+    except (TypeError, ValueError):
+        CAMERA_SOURCE = None
+CAMERA_ENABLED = CAMERA_SOURCE is not None
+
+secondary_rtsp_url = _env_str("SECONDARY_RTSP_URL") or _build_rtsp_url(secondary_camera_cfg)
+secondary_camera_index = secondary_camera_cfg.get("index")
+SECONDARY_CAMERA_SOURCE = None
+if secondary_rtsp_url:
+    SECONDARY_CAMERA_SOURCE = secondary_rtsp_url
+elif secondary_camera_index is not None:
+    try:
+        SECONDARY_CAMERA_SOURCE = int(secondary_camera_index)
+    except (TypeError, ValueError):
+        SECONDARY_CAMERA_SOURCE = None
+SECONDARY_CAMERA_ENABLED = SECONDARY_CAMERA_SOURCE is not None
+
+MIN_AREA = int(paper_cfg.get("min_area") or 3000)                 # min contour area in FULL resolution
+MAX_AREA_FRAC = float(paper_cfg.get("max_area_frac") or 0.10)     # max area as fraction of full frame
+MATCH_WIDTH = int(paper_cfg.get("match_width") or 300)            # mask matching width
+MIN_TM_SCORE = float(paper_cfg.get("min_tm_score") or 1e-12)       # minimal template match score
+COLOR_STD_MIN = float(paper_cfg.get("color_std_min") or 40.0)      # reject very uniform patches (e.g. blank)
 
 # OCR / Number Detection Settings
-OCR_MODEL_ID          = "./trocr-large-printed"  # local model dir
-OCR_CENTER_CROP_RATIO = 0.8
-OCR_BAND_HEIGHT_RATIO = 0.5
-OCR_DIGITS_ONLY       = True
+OCR_MODEL_ID          = str(ocr_cfg.get("model_id") or "./trocr-large-printed")  # local model dir
+OCR_CENTER_CROP_RATIO = float(ocr_cfg.get("center_crop_ratio") or 0.8)
+OCR_BAND_HEIGHT_RATIO = float(ocr_cfg.get("band_height_ratio") or 0.5)
+OCR_DIGITS_ONLY       = bool(ocr_cfg.get("digits_only", True))
 
 # Approved RFID tags storage
 APPROVED_TAGS_PATH = BASE_DIR / "approved_tags.json"
-
-rfid_cfg = APP_CONFIG.get("rfid", {})
-capture_cfg = APP_CONFIG.get("capture", {})
 
 # RFID reader connection (configure in config.json or via env vars)
 RFID_HOST = _env_str("RFID_HOST") or str(rfid_cfg.get("host") or "").strip()
 RFID_PORT = _env_int("RFID_PORT") or int(rfid_cfg.get("port") or 6000)
 RFID_RECONNECT_SECONDS = _env_float("RFID_RECONNECT_SECONDS") or float(rfid_cfg.get("reconnect_seconds") or 2.0)
 RFID_DEBOUNCE_SECONDS = _env_float("RFID_DEBOUNCE_SECONDS") or float(rfid_cfg.get("debounce_seconds") or 1.0)
-RFID_QUEUE_MAXSIZE = int(_env_int("RFID_QUEUE_MAXSIZE") or 50)
-TAG_COOLDOWN_SECONDS = float(os.environ.get("TAG_COOLDOWN_SECONDS", "3.0"))
-TAG_SUBMIT_COOLDOWN_SECONDS = float(os.environ.get("TAG_SUBMIT_COOLDOWN_SECONDS", "300.0"))  # 5 minutes after submit
+RFID_QUEUE_MAXSIZE = int(_env_int("RFID_QUEUE_MAXSIZE") or (rfid_cfg.get("queue_maxsize") or 50))
+RFID_PRESENCE_WINDOW_SECONDS = float(
+    _env_float("RFID_PRESENCE_WINDOW_SECONDS") or float(rfid_cfg.get("present_window_seconds") or 2.0)
+)
+TAG_COOLDOWN_SECONDS = float(os.environ.get("TAG_COOLDOWN_SECONDS", str(timing_cfg.get("tag_cooldown_seconds") or 3.0)))
+TAG_SUBMIT_COOLDOWN_SECONDS = float(
+    os.environ.get("TAG_SUBMIT_COOLDOWN_SECONDS", str(timing_cfg.get("tag_submit_cooldown_seconds") or 300.0))
+)  # 5 minutes after submit
 
 # Captured data persistence
 CAPTURE_OUTPUT_DIR = BASE_DIR / "submissions"
@@ -188,9 +268,13 @@ CAPTURE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CAPTURE_RETRY_INTERVAL_SECONDS = _env_float("CAPTURE_RETRY_INTERVAL_SECONDS") or float(capture_cfg.get("retry_interval_seconds") or 0.4)
 CAPTURE_TIMEOUT_SECONDS = _env_float("CAPTURE_TIMEOUT_SECONDS") or float(capture_cfg.get("timeout_seconds") or 30.0)
 TARGET_DIGITS = int(capture_cfg.get("target_digits") or 5)
+REQUIRE_LABEL_MATCH_FOR_SUBMIT = bool(capture_cfg.get("require_label_match_for_submit", True))
+
+UI_POLL_INTERVAL_MS = int(ui_cfg.get("poll_interval_ms") or 1000)
+UI_BEEP_ON_DETECTION_DEFAULT = bool(ui_cfg.get("beep_on_detection_default", False))
 
 approved_tags_lock = threading.Lock()
-approved_tags = set()
+approved_tags = {}
 
 
 def _normalize_tag(tag: str) -> str:
@@ -200,51 +284,130 @@ def _normalize_tag(tag: str) -> str:
     return tag
 
 
-def _load_approved_tags_from_disk() -> set:
+def _normalize_label_value(label) -> str:
+    if label is None:
+        return ""
+    label_text = str(label).strip()
+    if not label_text:
+        return ""
+    return "".join(re.findall(r"\d", label_text))
+
+
+def _validate_label_input(label: str) -> Tuple[bool, str, str]:
+    if label is None:
+        return True, "", ""
+    label_text = str(label).strip()
+    if not label_text:
+        return True, "", ""
+    if not re.fullmatch(r"\d+", label_text):
+        return False, "", "Label must contain digits only"
+    if TARGET_DIGITS > 0 and len(label_text) != TARGET_DIGITS:
+        return False, "", f"Label must be {TARGET_DIGITS} digits"
+    return True, label_text, ""
+
+
+def _is_new_tag_format(data) -> bool:
+    if not isinstance(data, dict):
+        return False
+    approved = data.get("approved_tags")
+    if not isinstance(approved, dict):
+        return False
+    for val in approved.values():
+        if not isinstance(val, dict):
+            return False
+    return True
+
+
+def _load_approved_tags_from_disk() -> Tuple[dict, bool]:
     if not APPROVED_TAGS_PATH.exists():
-        return set()
+        return {}, False
 
     try:
         data = json.loads(APPROVED_TAGS_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return set()
+        return {}, False
+
+    needs_migration = not _is_new_tag_format(data)
+
+    tags = {}
+
+    def add_tag_entry(raw_tag, raw_label=""):
+        if not isinstance(raw_tag, str):
+            return
+        normalized = _normalize_tag(raw_tag)
+        if not normalized:
+            return
+        tags[normalized] = {"label": _normalize_label_value(raw_label)}
+
+    def ingest_list(raw_list):
+        for item in raw_list:
+            if isinstance(item, str):
+                add_tag_entry(item, "")
+            elif isinstance(item, dict):
+                tag_val = item.get("tag")
+                label_val = item.get("label", "")
+                if tag_val:
+                    add_tag_entry(tag_val, label_val)
+
+    def ingest_mapping(raw_map):
+        for raw_tag, info in raw_map.items():
+            if isinstance(info, dict):
+                label_val = info.get("label", "")
+            else:
+                label_val = info
+            add_tag_entry(raw_tag, label_val)
 
     if isinstance(data, list):
-        raw_tags = data
-    elif isinstance(data, dict):
-        raw_tags = data.get("approved_tags") or data.get("tags") or []
-    else:
-        raw_tags = []
+        ingest_list(data)
+        return tags, True
 
-    tags = set()
-    for raw_tag in raw_tags:
-        if not isinstance(raw_tag, str):
-            continue
-        normalized = _normalize_tag(raw_tag)
-        if normalized:
-            tags.add(normalized)
-    return tags
+    if isinstance(data, dict):
+        raw_approved = data.get("approved_tags")
+        if isinstance(raw_approved, dict):
+            ingest_mapping(raw_approved)
+        elif isinstance(raw_approved, list):
+            ingest_list(raw_approved)
+
+        raw_tags = data.get("tags")
+        if isinstance(raw_tags, list):
+            ingest_list(raw_tags)
+
+        if not isinstance(raw_approved, (dict, list)) and not isinstance(raw_tags, list):
+            ingest_mapping(data)
+
+    return tags, needs_migration
 
 
-def _save_approved_tags_to_disk(tags: set) -> None:
-    data = {"approved_tags": sorted(tags)}
+def _save_approved_tags_to_disk(tags: dict) -> None:
+    serialized = {}
+    for tag in sorted(tags):
+        entry = tags.get(tag) or {}
+        label = ""
+        if isinstance(entry, dict):
+            label = entry.get("label") or ""
+        elif isinstance(entry, str):
+            label = entry
+        serialized[tag] = {"label": _normalize_label_value(label)}
+    data = {"approved_tags": serialized}
     tmp_path = APPROVED_TAGS_PATH.with_suffix(APPROVED_TAGS_PATH.suffix + ".tmp")
     tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp_path.replace(APPROVED_TAGS_PATH)
 
 
 with approved_tags_lock:
-    approved_tags.update(_load_approved_tags_from_disk())
-    if not APPROVED_TAGS_PATH.exists():
+    loaded_tags, needs_migration = _load_approved_tags_from_disk()
+    approved_tags.clear()
+    approved_tags.update(loaded_tags)
+    if not APPROVED_TAGS_PATH.exists() or needs_migration:
         try:
             _save_approved_tags_to_disk(approved_tags)
         except Exception:
             pass
 
 
-def _approve_tag(tag: str) -> Tuple[bool, str]:
+def _upsert_tag(tag: str, label: str = None) -> Tuple[bool, str]:
     """
-    Add tag to approved list + persist. Returns (added, message).
+    Add or update tag/label + persist. Returns (success, message).
     """
     if not isinstance(tag, str):
         return False, "Invalid tag"
@@ -252,22 +415,82 @@ def _approve_tag(tag: str) -> Tuple[bool, str]:
     if not norm:
         return False, "Invalid tag"
 
+    label_value = None
+    if label is not None:
+        ok, label_value, err = _validate_label_input(label)
+        if not ok:
+            return False, err
+
     with approved_tags_lock:
-        if norm in approved_tags:
-            return False, "Already approved"
-        approved_tags.add(norm)
+        entry = approved_tags.get(norm)
+        if entry is not None and not isinstance(entry, dict):
+            entry = {"label": _normalize_label_value(entry)}
+            approved_tags[norm] = entry
+        prev_label = entry.get("label") if isinstance(entry, dict) else ""
+        changed = False
+
+        if entry is None:
+            approved_tags[norm] = {"label": label_value or ""}
+            changed = True
+        elif label_value is not None and label_value != (prev_label or ""):
+            entry["label"] = label_value
+            changed = True
+
+        if not changed:
+            return True, "Already approved"
+
         try:
             _save_approved_tags_to_disk(approved_tags)
         except Exception as e:
-            approved_tags.discard(norm)
+            if entry is None:
+                approved_tags.pop(norm, None)
+            elif label_value is not None and isinstance(entry, dict):
+                entry["label"] = prev_label or ""
             return False, f"Failed to save: {e}"
 
-    return True, "Added"
+    return True, "Updated" if entry is not None else "Added"
 
 
 def _is_tag_approved(tag: str) -> bool:
     with approved_tags_lock:
         return tag in approved_tags
+
+
+def _get_tag_label(tag: str) -> str:
+    with approved_tags_lock:
+        entry = approved_tags.get(tag)
+    if isinstance(entry, dict):
+        return _normalize_label_value(entry.get("label"))
+    if isinstance(entry, str):
+        return _normalize_label_value(entry)
+    return ""
+
+
+def _get_approved_tag_items() -> list:
+    with approved_tags_lock:
+        return [
+            {
+                "tag": tag,
+                "label": _normalize_label_value(entry.get("label") if isinstance(entry, dict) else entry),
+            }
+            for tag, entry in sorted(approved_tags.items())
+        ]
+
+
+def _find_tags_by_label(label: str) -> list:
+    label_norm = _normalize_label_value(label)
+    if not label_norm:
+        return []
+    with approved_tags_lock:
+        matches = []
+        for tag, entry in approved_tags.items():
+            if isinstance(entry, dict):
+                entry_label = _normalize_label_value(entry.get("label"))
+            else:
+                entry_label = _normalize_label_value(entry)
+            if entry_label == label_norm:
+                matches.append(tag)
+        return matches
 
 
 def _utc_iso(ts: float) -> str:
@@ -310,6 +533,13 @@ capture_status = {
     "submitted_prefix": "",
     "secondary_b64": None,
     "secondary_message": "",
+    "label_expected": "",
+    "label_detected": "",
+    "label_match": None,
+    "label_message": "",
+    "warning_message": "",
+    "resolved_tag": "",
+    "effective_tag": "",
 }
 
 
@@ -780,9 +1010,10 @@ def find_best_candidate_single_frame(frame):
 # Init camera + background reader
 # ============================
 
+camera_source_label = rtsp_url or (f"index:{camera_index}" if camera_index is not None else "")
 camera_status = {
     "enabled": CAMERA_ENABLED,
-    "rtsp_url": rtsp_url,
+    "rtsp_url": camera_source_label,
     "connected": False,
     "last_error": "",
     "last_frame_time": None,
@@ -794,9 +1025,10 @@ latest_frame = None
 frame_lock = threading.Lock()
 reader_running = True
 
+secondary_source_label = secondary_rtsp_url or (f"index:{secondary_camera_index}" if secondary_camera_index is not None else "")
 secondary_camera_status = {
     "enabled": SECONDARY_CAMERA_ENABLED,
-    "rtsp_url": secondary_rtsp_url,
+    "rtsp_url": secondary_source_label,
     "connected": False,
     "last_error": "",
     "last_frame_time": None,
@@ -806,6 +1038,28 @@ cap_secondary = None
 secondary_frame = None
 secondary_frame_lock = threading.Lock()
 secondary_reader_running = True
+
+
+def _apply_camera_settings(cap, cfg: dict) -> None:
+    width = cfg.get("width")
+    height = cfg.get("height")
+    fps = cfg.get("fps")
+    auto_exposure = cfg.get("auto_exposure")
+    exposure = cfg.get("exposure")
+
+    try:
+        if width:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(width))
+        if height:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(height))
+        if fps:
+            cap.set(cv2.CAP_PROP_FPS, float(fps))
+        if auto_exposure is not None:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, float(auto_exposure))
+        if exposure is not None:
+            cap.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
+    except Exception:
+        pass
 
 
 def _open_camera():
@@ -820,13 +1074,15 @@ def _open_camera():
     except Exception:
         pass
 
-    cap = cv2.VideoCapture(rtsp_url)
+    cap = cv2.VideoCapture(CAMERA_SOURCE)
 
     # Try to reduce buffering latency if supported
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
+
+    _apply_camera_settings(cap, camera_cfg)
 
     return bool(cap.isOpened())
 
@@ -841,7 +1097,7 @@ def rtsp_reader():
             with state_lock:
                 camera_status["enabled"] = False
                 camera_status["connected"] = False
-                camera_status["last_error"] = "Camera disabled (missing RTSP config)"
+                camera_status["last_error"] = "Camera disabled (missing camera config)"
             time.sleep(0.5)
             continue
 
@@ -849,9 +1105,9 @@ def rtsp_reader():
             ok_open = _open_camera()
             with state_lock:
                 camera_status["enabled"] = True
-                camera_status["rtsp_url"] = rtsp_url
+                camera_status["rtsp_url"] = camera_source_label
                 camera_status["connected"] = bool(ok_open)
-                camera_status["last_error"] = "" if ok_open else f"Failed to open RTSP stream: {rtsp_url}"
+                camera_status["last_error"] = "" if ok_open else f"Failed to open stream: {camera_source_label}"
 
             if not ok_open:
                 time.sleep(1.0)
@@ -898,11 +1154,12 @@ def _open_secondary_camera():
     except Exception:
         pass
 
-    cap_secondary = cv2.VideoCapture(secondary_rtsp_url)
+    cap_secondary = cv2.VideoCapture(SECONDARY_CAMERA_SOURCE)
     try:
         cap_secondary.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
         pass
+    _apply_camera_settings(cap_secondary, secondary_camera_cfg)
     return bool(cap_secondary.isOpened())
 
 
@@ -917,7 +1174,7 @@ def secondary_rtsp_reader():
             with state_lock:
                 secondary_camera_status["enabled"] = False
                 secondary_camera_status["connected"] = False
-                secondary_camera_status["last_error"] = "Secondary camera disabled (missing RTSP config)"
+                secondary_camera_status["last_error"] = "Secondary camera disabled (missing camera config)"
             time.sleep(1.0)
             continue
 
@@ -925,9 +1182,9 @@ def secondary_rtsp_reader():
             ok_open = _open_secondary_camera()
             with state_lock:
                 secondary_camera_status["enabled"] = True
-                secondary_camera_status["rtsp_url"] = secondary_rtsp_url
+                secondary_camera_status["rtsp_url"] = secondary_source_label
                 secondary_camera_status["connected"] = bool(ok_open)
-                secondary_camera_status["last_error"] = "" if ok_open else f"Failed to open RTSP stream: {secondary_rtsp_url}"
+                secondary_camera_status["last_error"] = "" if ok_open else f"Failed to open stream: {secondary_source_label}"
 
             if not ok_open:
                 time.sleep(1.5)
@@ -1079,6 +1336,10 @@ def _save_capture_to_disk(capture: dict) -> dict:
         "timestamp_iso": _utc_iso(ts),
         "files": {},
     }
+    if capture.get("tag_original"):
+        meta["tag_original"] = capture.get("tag_original")
+    if capture.get("resolved_tag"):
+        meta["resolved_tag"] = capture.get("resolved_tag")
 
     if capture.get("original_b64"):
         try:
@@ -1114,6 +1375,84 @@ def _save_capture_to_disk(capture: dict) -> dict:
 def _extract_target_digits(text: str) -> str:
     digits = "".join(re.findall(r"\d", text or ""))
     return digits[:TARGET_DIGITS] if len(digits) >= TARGET_DIGITS else ""
+
+
+def _get_recent_tags(window_seconds: float) -> set:
+    now = time.time()
+    with state_lock:
+        if window_seconds <= 0:
+            return set(rfid_last_seen_by_tag.keys())
+        return {tag for tag, ts in rfid_last_seen_by_tag.items() if (now - ts) <= window_seconds}
+
+
+def _resolve_label_for_capture(tag: str, detected_label: str) -> dict:
+    detected_label = _normalize_label_value(detected_label)
+    expected_label = _normalize_label_value(_get_tag_label(tag))
+
+    label_match = True
+    resolved_tag = ""
+    warning_message = ""
+
+    if expected_label:
+        if detected_label != expected_label:
+            now = time.time()
+            label_match = False
+            warning_message = f"Label mismatch: expected {expected_label}, detected {detected_label}."
+            _append_event(
+                {
+                    "type": "mismatch",
+                    "time": now,
+                    "time_iso": _utc_iso(now),
+                    "tag": tag,
+                    "expected": expected_label,
+                    "detected": detected_label,
+                }
+            )
+
+            candidates = _find_tags_by_label(detected_label)
+            if candidates:
+                present = _get_recent_tags(RFID_PRESENCE_WINDOW_SECONDS)
+                candidates = [candidate for candidate in candidates if candidate in present]
+
+            if len(candidates) == 1:
+                resolved_tag = candidates[0]
+                label_match = True
+                warning_message = f"Resolved to tag {resolved_tag} (was {tag})."
+                _append_event(
+                    {
+                        "type": "resolved",
+                        "time": now,
+                        "time_iso": _utc_iso(now),
+                        "tag": tag,
+                        "resolved_tag": resolved_tag,
+                        "detected_label": detected_label,
+                    }
+                )
+            elif len(candidates) == 0:
+                warning_message = (
+                    f"Label mismatch: expected {expected_label}, detected {detected_label}. "
+                    "No matching tag present."
+                )
+            else:
+                warning_message = (
+                    f"Label mismatch: expected {expected_label}, detected {detected_label}. "
+                    "Multiple matching tags present."
+                )
+    else:
+        # Allow submit when no expected label is set, but keep a warning visible.
+        warning_message = "No expected label set for this tag. Submit allowed."
+
+    effective_tag = resolved_tag or tag
+
+    return {
+        "label_expected": expected_label,
+        "label_detected": detected_label,
+        "label_match": label_match,
+        "label_message": warning_message,
+        "warning_message": warning_message,
+        "resolved_tag": resolved_tag,
+        "effective_tag": effective_tag,
+    }
 
 
 capture_running = True
@@ -1161,6 +1500,13 @@ def _process_capture_for_tag(tag: str) -> None:
                     "submitted_prefix": "",
                     "secondary_b64": None,
                     "secondary_message": "",
+                    "label_expected": "",
+                    "label_detected": "",
+                    "label_match": None,
+                    "label_message": "",
+                    "resolved_tag": "",
+                    "warning_message": "",
+                    "effective_tag": "",
                 }
             )
         return
@@ -1185,6 +1531,13 @@ def _process_capture_for_tag(tag: str) -> None:
                 "submitted_prefix": "",
                 "secondary_b64": None,
                 "secondary_message": "",
+                "label_expected": "",
+                "label_detected": "",
+                "label_match": None,
+                "label_message": "",
+                "resolved_tag": "",
+                "warning_message": "",
+                "effective_tag": "",
             }
         )
 
@@ -1217,6 +1570,7 @@ def _process_capture_for_tag(tag: str) -> None:
         if number:
             sec_b64, sec_msg = grab_secondary_snapshot()
             done = time.time()
+            label_info = _resolve_label_for_capture(tag, number)
             with state_lock:
                 capture_status["state"] = "awaiting_submit"
                 capture_status["number"] = number
@@ -1228,6 +1582,13 @@ def _process_capture_for_tag(tag: str) -> None:
                 capture_status["submitted_prefix"] = ""
                 capture_status["secondary_b64"] = sec_b64
                 capture_status["secondary_message"] = sec_msg or ""
+                capture_status["label_expected"] = label_info.get("label_expected", "")
+                capture_status["label_detected"] = label_info.get("label_detected", "")
+                capture_status["label_match"] = label_info.get("label_match")
+                capture_status["label_message"] = label_info.get("label_message", "")
+                capture_status["resolved_tag"] = label_info.get("resolved_tag", "")
+                capture_status["warning_message"] = label_info.get("warning_message", "")
+                capture_status["effective_tag"] = label_info.get("effective_tag", "")
 
             _clear_rfid_queue()
             _append_event(
@@ -1253,6 +1614,13 @@ def _process_capture_for_tag(tag: str) -> None:
                 capture_status["submitted_path"] = ""
                 capture_status["submitted_time"] = None
                 capture_status["submitted_prefix"] = ""
+                capture_status["label_expected"] = ""
+                capture_status["label_detected"] = ""
+                capture_status["label_match"] = None
+                capture_status["label_message"] = ""
+                capture_status["resolved_tag"] = ""
+                capture_status["warning_message"] = ""
+                capture_status["effective_tag"] = ""
 
             _append_event(
                 {
@@ -1287,14 +1655,20 @@ capture_thread.start()
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        target_digits=TARGET_DIGITS,
+        poll_interval_ms=UI_POLL_INTERVAL_MS,
+        beep_default=UI_BEEP_ON_DETECTION_DEFAULT,
+        require_label_match=REQUIRE_LABEL_MATCH_FOR_SUBMIT,
+        present_window_seconds=RFID_PRESENCE_WINDOW_SECONDS,
+    )
 
 
 @app.route("/api/tags", methods=["GET"])
 def api_get_tags():
-    with approved_tags_lock:
-        tags = sorted(approved_tags)
-    return jsonify({"tags": tags, "count": len(tags)})
+    items = _get_approved_tag_items()
+    return jsonify({"items": items, "count": len(items), "target_digits": TARGET_DIGITS})
 
 
 @app.route("/api/tags", methods=["POST"])
@@ -1304,19 +1678,23 @@ def api_add_tag():
     tag = _normalize_tag(raw)
     if not tag:
         return jsonify({"success": False, "message": "Missing tag"}), 400
+    label = payload.get("label") if "label" in payload else None
 
-    added, msg = _approve_tag(tag)
-    if not added and msg == "Already approved":
-        with approved_tags_lock:
-            tags = sorted(approved_tags)
-        return jsonify({"success": True, "tag": tag, "tags": tags, "count": len(tags), "message": msg})
-    if not added:
-        return jsonify({"success": False, "message": msg}), 500
+    ok, msg = _upsert_tag(tag, label)
+    if not ok:
+        status = 400 if ("Label" in msg or "Invalid" in msg) else 500
+        return jsonify({"success": False, "message": msg}), status
 
-    with approved_tags_lock:
-        tags = sorted(approved_tags)
-
-    return jsonify({"success": True, "tag": tag, "tags": tags, "count": len(tags)})
+    items = _get_approved_tag_items()
+    return jsonify(
+        {
+            "success": True,
+            "item": {"tag": tag, "label": _get_tag_label(tag)},
+            "items": items,
+            "count": len(items),
+            "message": msg,
+        }
+    )
 
 
 @app.route("/api/tags/<tag>", methods=["DELETE"])
@@ -1327,17 +1705,18 @@ def api_delete_tag(tag: str):
 
     with approved_tags_lock:
         existed = tag_norm in approved_tags
-        approved_tags.discard(tag_norm)
+        prev_entry = approved_tags.get(tag_norm)
+        if existed:
+            approved_tags.pop(tag_norm, None)
         try:
             _save_approved_tags_to_disk(approved_tags)
         except Exception as e:
             if existed:
-                approved_tags.add(tag_norm)
+                approved_tags[tag_norm] = prev_entry
             return jsonify({"success": False, "message": f"Failed to save: {e}"}), 500
 
-        tags = sorted(approved_tags)
-
-    return jsonify({"success": True, "removed": existed, "tag": tag_norm, "tags": tags, "count": len(tags)})
+    items = _get_approved_tag_items()
+    return jsonify({"success": True, "removed": existed, "tag": tag_norm, "items": items, "count": len(items)})
 
 
 @app.route("/api/status", methods=["GET"])
@@ -1358,11 +1737,13 @@ def api_status():
     with approved_tags_lock:
         approved_count = len(approved_tags)
 
-    if capture.get("tag"):
-        cooldown_until = float(tag_submit_cooldowns.get(capture["tag"]) or 0.0)
+    effective_tag = capture.get("effective_tag") or capture.get("resolved_tag") or capture.get("tag")
+    if effective_tag:
+        cooldown_until = float(tag_submit_cooldowns.get(effective_tag) or 0.0)
         if cooldown_until > 0:
             capture["cooldown_until"] = cooldown_until
             capture["cooldown_until_iso"] = _utc_iso(cooldown_until)
+            capture["cooldown_tag"] = effective_tag
 
     if rfid.get("last_tag_time") is not None:
         rfid["last_tag_time_iso"] = _utc_iso(rfid["last_tag_time"])
@@ -1399,17 +1780,27 @@ def api_submit_capture():
         return jsonify({"success": False, "message": "No capture awaiting submit"}), 400
     if not capture.get("number"):
         return jsonify({"success": False, "message": "No number captured"}), 400
+    if REQUIRE_LABEL_MATCH_FOR_SUBMIT and capture.get("label_match") is False:
+        message = capture.get("warning_message") or capture.get("label_message") or "Label mismatch; submit blocked"
+        return jsonify({"success": False, "message": message}), 400
+
+    effective_tag = capture.get("effective_tag") or capture.get("resolved_tag") or capture.get("tag") or ""
+    save_capture = dict(capture)
+    if effective_tag:
+        if capture.get("tag") and capture.get("tag") != effective_tag:
+            save_capture["tag_original"] = capture.get("tag")
+        save_capture["tag"] = effective_tag
+        save_capture["effective_tag"] = effective_tag
 
     try:
-        saved = _save_capture_to_disk(capture)
+        saved = _save_capture_to_disk(save_capture)
     except Exception as e:
         return jsonify({"success": False, "message": f"Failed to save: {e}"}), 500
 
     cooldown_until = None
-    tag = capture.get("tag") or ""
-    if tag:
+    if effective_tag:
         cooldown_until = time.time() + TAG_SUBMIT_COOLDOWN_SECONDS
-        tag_submit_cooldowns[tag] = cooldown_until
+        tag_submit_cooldowns[effective_tag] = cooldown_until
         saved["cooldown_until"] = cooldown_until
         saved["cooldown_until_iso"] = _utc_iso(cooldown_until)
 
@@ -1426,8 +1817,11 @@ def api_submit_capture():
             "type": "submitted",
             "time": saved.get("timestamp", time.time()),
             "time_iso": saved.get("timestamp_iso", _utc_iso(time.time())),
-            "tag": tag,
+            "tag": effective_tag,
+            "tag_original": capture.get("tag") if effective_tag and capture.get("tag") != effective_tag else "",
             "number": capture.get("number") or "",
+            "label_detected": capture.get("label_detected") or "",
+            "label_match": capture.get("label_match"),
             "path": saved["files"].get("json", ""),
         }
     )
@@ -1524,11 +1918,12 @@ if __name__ == "__main__":
         # Flask's debug reloader runs the script twice on Windows (spawning a second process),
         # which can easily double memory usage with large ML models loaded at import time.
         debug_env = os.environ.get("FLASK_DEBUG") or os.environ.get("DEBUG")
-        debug_enabled = (
-            True
-            if debug_env is None
-            else debug_env.strip().lower() in {"1", "true", "yes", "on"}
-        )
-        app.run(debug=debug_enabled, use_reloader=False)
+        if debug_env is None:
+            debug_enabled = bool(app_cfg.get("debug", False))
+        else:
+            debug_enabled = debug_env.strip().lower() in {"1", "true", "yes", "on"}
+        app_host = _env_str("APP_HOST") or str(app_cfg.get("host") or "0.0.0.0")
+        app_port = _env_int("APP_PORT") or int(app_cfg.get("port") or 5000)
+        app.run(host=app_host, port=app_port, debug=debug_enabled, use_reloader=False)
     finally:
         cleanup()

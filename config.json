@@ -1,21 +1,72 @@
 {
+  "auto_fill_missing": true,
+  "app": {
+    "host": "0.0.0.0",
+    "port": 5000,
+    "debug": false
+  },
   "camera": {
+    "index": null,
     "host": "192.168.1.3",
     "port": 554,
     "username": "user1",
     "password": "Admin123456",
     "path": "/live/0/main",
-    "rtsp_url": ""
+    "rtsp_url": "",
+    "width": null,
+    "height": null,
+    "fps": null,
+    "auto_exposure": null,
+    "exposure": null
+  },
+  "secondary_camera": {
+    "index": null,
+    "host": "192.168.1.4",
+    "port": 554,
+    "username": "user1",
+    "password": "",
+    "path": "/live/0/main",
+    "rtsp_url": "",
+    "width": null,
+    "height": null,
+    "fps": null,
+    "auto_exposure": null,
+    "exposure": null
   },
   "rfid": {
     "host": "192.168.1.2",
     "port": 6000,
     "reconnect_seconds": 2.0,
-    "debounce_seconds": 1.0
+    "debounce_seconds": 1.0,
+    "present_window_seconds": 2.0,
+    "queue_maxsize": 50
+  },
+  "timing": {
+    "tag_cooldown_seconds": 3.0,
+    "tag_submit_cooldown_seconds": 300.0
   },
   "capture": {
     "retry_interval_seconds": 0.4,
     "timeout_seconds": 30.0,
-    "target_digits": 5
+    "target_digits": 5,
+    "require_label_match_for_submit": true
+  },
+  "paper_detection": {
+    "mask_path": "Mask.png",
+    "min_area": 3000,
+    "max_area_frac": 0.1,
+    "match_width": 300,
+    "min_tm_score": 1e-12,
+    "color_std_min": 40.0
+  },
+  "ocr": {
+    "model_id": "./trocr-large-printed",
+    "center_crop_ratio": 0.8,
+    "band_height_ratio": 0.5,
+    "digits_only": true
+  },
+  "ui": {
+    "beep_on_detection_default": true,
+    "poll_interval_ms": 1000
   }
 }

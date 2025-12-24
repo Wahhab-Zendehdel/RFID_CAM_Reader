@@ -15,6 +15,10 @@
       --danger: #ff4d4d;
       --ok: #22c55e;
       --border: rgba(255, 255, 255, 0.08);
+      --app-header-h: 56px;
+      --page-padding: 28px;
+      --content-padding: 24px;
+      --panel-gap: 8px;
     }
 
     * { box-sizing: border-box; }
@@ -116,12 +120,30 @@
       display: flex;
     }
 
+    .rfid-capture-layout {
+      flex: 1 1 auto;
+      min-height: 0;
+      min-width: 0;
+      width: 100%;
+      height: calc(100vh - var(--app-header-h) - var(--page-padding) - var(--content-padding));
+      height: calc(100dvh - var(--app-header-h) - var(--page-padding) - var(--content-padding));
+    }
+
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 12px;
       min-height: 0;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .panel-col {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
     }
 
     .row {
@@ -191,6 +213,7 @@
       font-size: 13px;
     }
 
+
     .tag-grid {
       flex: 1 1 auto;
       min-height: 0;
@@ -217,33 +240,48 @@
       border: 0;
       background: rgba(255, 255, 255, 0.08);
       color: var(--text);
-      width: 22px;
       height: 22px;
       border-radius: 999px;
       cursor: pointer;
       line-height: 22px;
-      padding: 0;
+      padding: 0 8px;
+      font-size: 11px;
     }
 
-    .capture-layout {
+    .capture-grid {
       flex: 1 1 auto;
       min-height: 0;
       display: grid;
-      grid-template-rows: 1fr 170px;
-      gap: 12px;
+      grid-template-columns: var(--capture-left-width, 34%) var(--capture-right-width, 66%);
+      gap: var(--capture-gap, 12px);
+      min-width: 0;
+      height: 100%;
     }
 
-    .capture-top {
-      min-height: 0;
+    .capture-col {
       display: grid;
-      grid-template-columns: 360px 1fr;
-      gap: 12px;
+      gap: var(--capture-gap, 12px);
+      min-height: 0;
+      min-width: 0;
+    }
+
+    .capture-col.capture-left {
+      grid-template-rows: minmax(0, var(--capture-left-top, 2.2fr)) minmax(0, var(--capture-left-bottom, 0.9fr));
+    }
+
+    .capture-col.capture-right {
+      grid-template-rows: minmax(0, var(--capture-right-top, 2.2fr)) minmax(0, var(--capture-right-bottom, 0.9fr));
+    }
+
+    .capture-col > .panel {
+      min-height: 0;
+      min-width: 0;
     }
 
     .kv {
       display: grid;
       grid-template-columns: 140px 1fr;
-      gap: 6px 10px;
+      gap: 4px 8px;
       font-size: 13px;
     }
 
@@ -256,21 +294,22 @@
     }
 
     .number {
-      margin-top: 10px;
+      margin-top: 6px;
       text-align: center;
-      padding: 14px 12px;
+      padding: 10px 10px;
       border-radius: 14px;
       border: 1px solid var(--border);
       background: rgba(0, 0, 0, 0.22);
-      font-size: clamp(40px, 5vw, 64px);
+      font-size: clamp(22px, 2.6vw, 46px);
       font-weight: 900;
-      letter-spacing: 4px;
+      letter-spacing: 2px;
     }
 
     .images {
       min-height: 0;
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-auto-rows: minmax(0, 1fr);
       gap: 12px;
     }
 
@@ -279,17 +318,22 @@
       flex-direction: column;
       gap: 8px;
       min-height: 0;
+      min-width: 0;
     }
 
     .image-title {
       color: var(--muted);
       font-size: 13px;
       font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .imgwrap {
       flex: 1 1 auto;
       min-height: 0;
+      min-width: 0;
       border-radius: 12px;
       border: 1px dashed var(--border);
       background: rgba(0, 0, 0, 0.18);
@@ -300,8 +344,8 @@
     }
 
     img {
-      max-width: 100%;
-      max-height: 100%;
+      width: 100%;
+      height: 100%;
       object-fit: contain;
       display: block;
     }
@@ -310,6 +354,7 @@
       width: 100%;
       border-collapse: collapse;
       font-size: 12px;
+      table-layout: fixed;
     }
 
     th, td {
@@ -327,14 +372,141 @@
       border-top: 0;
     }
 
-    @media (max-width: 920px) {
-      .capture-top { grid-template-columns: 1fr; }
-      .images { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    .events-scroll {
+      flex: 1 1 auto;
+      min-height: 0;
+      min-width: 0;
+      overflow: auto;
+      border-radius: 10px;
+      scrollbar-gutter: stable;
+      padding-inline-end: 6px;
+    }
+
+    .warning-box {
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.2);
+      min-height: 70px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: pre-wrap;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      scrollbar-gutter: stable;
+      padding-inline-end: 6px;
+    }
+
+    .warning-box.warn {
+      border-color: rgba(255, 77, 77, 0.6);
+      background: rgba(255, 77, 77, 0.14);
+      color: #ffd2d2;
+    }
+
+    .indicator-grid {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 12px;
+      margin-top: 8px;
+      font-size: 12px;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    .indicator-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .indicator-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+
+    .indicator-dot.on {
+      background: var(--ok);
+      border-color: rgba(34, 197, 94, 0.5);
+    }
+
+    .indicator-dot.warn {
+      background: var(--danger);
+      border-color: rgba(255, 77, 77, 0.6);
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .toggle input {
+      width: 16px;
+      height: 16px;
+    }
+
+    .panel-info { overflow: hidden; }
+    .panel-images { overflow: hidden; }
+    .panel-events { overflow: hidden; }
+    .panel-warnings { overflow: hidden; gap: 10px; }
+    .panel-images .images { flex: 1 1 auto; min-height: 0; }
+    .panel-heading { margin-bottom: var(--panel-gap); }
+    .panel-section { margin-top: var(--panel-gap); }
+    .panel-actions { margin-top: 6px; }
+
+    @media (max-width: 1200px) {
+      .capture-grid {
+        grid-template-columns: var(--capture-left-width-tablet, 40%) var(--capture-right-width-tablet, 60%);
+        gap: 10px;
+      }
+      .capture-col { gap: 10px; }
+      .images {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-auto-rows: minmax(150px, 1fr);
+        gap: 10px;
+      }
+    }
+
+    @media (max-width: 980px) {
+      body { overflow: auto; }
+      .rfid-capture-layout { height: auto; }
+      .capture-grid {
+        grid-template-columns: 1fr;
+        grid-auto-rows: auto;
+        gap: 10px;
+      }
+      .capture-col {
+        display: contents;
+      }
+      .panel-images { grid-row: 1; }
+      .panel-info { grid-row: 2; }
+      .panel-warnings { grid-row: 3; }
+      .panel-events { grid-row: 4; }
+      .images {
+        grid-template-columns: 1fr;
+        grid-auto-rows: minmax(180px, 1fr);
+      }
       .kv { grid-template-columns: 120px 1fr; }
     }
   </style>
 </head>
-<body>
+<body
+  data-target-digits="{{ target_digits|default(5) }}"
+  data-poll-interval="{{ poll_interval_ms|default(1000) }}"
+  data-beep-default="{{ '1' if beep_default else '0' }}"
+  data-require-label-match="{{ '1' if require_label_match else '0' }}"
+  data-present-window="{{ present_window_seconds|default(2.0) }}"
+>
   <div class="app">
     <header class="topbar">
       <div class="brand">RFID Label OCR</div>
@@ -355,6 +527,7 @@
         <div class="panel">
           <div class="row">
             <input id="tag-input" type="text" placeholder="Enter EPC/UID (hex) ..." autocomplete="off" />
+            <input id="label-input" type="text" placeholder="Label number" autocomplete="off" inputmode="numeric" />
             <button class="primary" id="add-tag-btn" type="button">Add Tag</button>
             <button class="secondary" id="listen-btn" type="button">Listening: OFF</button>
           </div>
@@ -369,29 +542,52 @@
       </section>
 
       <section class="tab-panel" id="tab-capture">
-        <div class="capture-layout">
-          <div class="capture-top">
-            <div class="panel">
-              <div class="hint" id="approved-count">Approved tags: 0</div>
-              <div class="kv" style="margin-top: 10px;">
+        <div class="rfid-capture-layout">
+          <div class="capture-grid">
+          <div class="capture-col capture-left">
+            <div class="panel panel-col panel-info">
+              <div class="hint panel-heading" id="approved-count">Approved tags: 0</div>
+              <div class="kv panel-section">
                 <div class="k">Last RFID tag</div><div class="v" id="last-tag">-</div>
                 <div class="k">Approved</div><div class="v" id="last-approved">-</div>
                 <div class="k">Queue</div><div class="v" id="queue-size">0</div>
                 <div class="k">Capture</div><div class="v" id="cap-state">idle</div>
-                <div class="k">For tag</div><div class="v" id="cap-tag">-</div>
+                <div class="k">Trigger tag</div><div class="v" id="cap-tag">-</div>
+                <div class="k">Effective tag</div><div class="v" id="cap-effective">-</div>
+                <div class="k">Expected label</div><div class="v" id="cap-expected">-</div>
+                <div class="k">Detected label</div><div class="v" id="cap-detected">-</div>
                 <div class="k">Attempt</div><div class="v" id="cap-attempt">0</div>
                 <div class="k">Message</div><div class="v" id="cap-msg">-</div>
               </div>
 
               <div class="number" id="cap-number">-----</div>
               <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
-              <div class="row" style="margin-top: 6px;">
+              <div class="row panel-actions">
                 <button class="primary" id="submit-btn" type="button" disabled>Submit capture</button>
                 <div class="hint" id="submit-status">Capture must succeed before submit.</div>
               </div>
             </div>
 
-            <div class="panel" style="min-height: 0;">
+            <div class="panel panel-col panel-events">
+              <div class="hint panel-heading">Recent events</div>
+              <div class="events-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="width: 90px;">Type</th>
+                      <th style="width: 120px;">Time (UTC)</th>
+                      <th>Tag / Info</th>
+                    </tr>
+                  </thead>
+                  <tbody id="events"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="capture-col capture-right">
+            <div class="panel panel-col panel-images">
+              <div class="hint panel-heading">Capture images</div>
               <div class="images">
                 <div class="image-box">
                   <div class="image-title">Original (outline)</div>
@@ -407,20 +603,22 @@
                 </div>
               </div>
             </div>
-          </div>
 
-          <div class="panel">
-            <div class="hint" style="margin-bottom: 8px;">Recent events</div>
-            <table>
-              <thead>
-                <tr>
-                  <th style="width: 90px;">Type</th>
-                  <th style="width: 120px;">Time (UTC)</th>
-                  <th>Tag / Info</th>
-                </tr>
-              </thead>
-              <tbody id="events"></tbody>
-            </table>
+            <div class="panel panel-col panel-warnings">
+              <div class="hint panel-heading">Warnings & indicators</div>
+              <div class="warning-box" id="cap-warning">No warnings.</div>
+              <div class="indicator-grid">
+                <div class="indicator-row"><span class="indicator-dot" id="ind-rfid"></span><span>RFID connected</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-tag"></span><span>Tag detected</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-label"></span><span>Label detected</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-match"></span><span>Label match</span></div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="beep-toggle" />
+                Beep on detection
+              </label>
+            </div>
+          </div>
           </div>
         </div>
       </section>
@@ -438,6 +636,7 @@
     const connText = document.getElementById("conn-text");
 
     const tagInput = document.getElementById("tag-input");
+    const labelInput = document.getElementById("label-input");
     const addTagBtn = document.getElementById("add-tag-btn");
     const listenBtn = document.getElementById("listen-btn");
     const tagsStatus = document.getElementById("tags-status");
@@ -450,21 +649,59 @@
     const queueSize = document.getElementById("queue-size");
     const capState = document.getElementById("cap-state");
     const capTag = document.getElementById("cap-tag");
+    const capEffective = document.getElementById("cap-effective");
+    const capExpected = document.getElementById("cap-expected");
+    const capDetected = document.getElementById("cap-detected");
     const capAttempt = document.getElementById("cap-attempt");
     const capMsg = document.getElementById("cap-msg");
     const capNumber = document.getElementById("cap-number");
     const capSub = document.getElementById("cap-sub");
+    const capWarning = document.getElementById("cap-warning");
     const submitBtn = document.getElementById("submit-btn");
     const submitStatus = document.getElementById("submit-status");
     const imgOriginal = document.getElementById("img-original");
     const imgPaper = document.getElementById("img-paper");
     const imgSecondary = document.getElementById("img-secondary");
     const eventsBody = document.getElementById("events");
+    const indRfid = document.getElementById("ind-rfid");
+    const indTag = document.getElementById("ind-tag");
+    const indLabel = document.getElementById("ind-label");
+    const indMatch = document.getElementById("ind-match");
+    const beepToggle = document.getElementById("beep-toggle");
+
+    const rawTargetDigits = Number(document.body.dataset.targetDigits || 5);
+    let targetDigits = Number.isFinite(rawTargetDigits) && rawTargetDigits > 0 ? rawTargetDigits : null;
+    const pollIntervalMs = Number(document.body.dataset.pollInterval || 1000);
+    const safePollIntervalMs = Number.isFinite(pollIntervalMs) && pollIntervalMs > 200 ? pollIntervalMs : 1000;
+    const requireLabelMatch = document.body.dataset.requireLabelMatch === "1";
+    const presentWindowSeconds = Number(document.body.dataset.presentWindow || 2);
+    const safePresentWindowSeconds = Number.isFinite(presentWindowSeconds) && presentWindowSeconds > 0 ? presentWindowSeconds : 2;
+    const beepDefault = document.body.dataset.beepDefault === "1";
+    const tagsCache = new Map();
 
     let activeTab = "tags";
     let pollInFlight = false;
     let listenEnabled = false;
     let lastScannedTime = Date.now() / 1000;
+    let lastBeepTagTime = 0;
+    let lastBeepLabelTime = 0;
+    let latestTagTime = 0;
+    let latestNumberTime = 0;
+    let beepEnabled = beepDefault;
+
+    function applyTargetDigits(value) {
+      const digits = Number.isFinite(value) && value > 0 ? value : null;
+      targetDigits = digits;
+      if (labelInput) {
+        labelInput.placeholder = digits ? `Label number (${digits} digits)` : "Label number";
+        labelInput.maxLength = digits ? digits : 24;
+      }
+    }
+
+    applyTargetDigits(targetDigits);
+    if (beepToggle) {
+      beepToggle.checked = beepEnabled;
+    }
 
     function setActiveTab(name) {
       activeTab = name;
@@ -473,9 +710,29 @@
       if (name !== "tags") setListening(false);
     }
 
+    function updateCaptureLayoutVars() {
+      const appEl = document.querySelector(".app");
+      const topbarEl = document.querySelector(".topbar");
+      const contentEl = document.querySelector(".content");
+      if (!appEl || !topbarEl || !contentEl) return;
+
+      const appStyles = getComputedStyle(appEl);
+      const contentStyles = getComputedStyle(contentEl);
+      const appPadY = parseFloat(appStyles.paddingTop) + parseFloat(appStyles.paddingBottom);
+      const appGap = parseFloat(appStyles.rowGap || appStyles.gap || 0);
+      const contentPadY = parseFloat(contentStyles.paddingTop) + parseFloat(contentStyles.paddingBottom);
+
+      document.documentElement.style.setProperty("--app-header-h", `${topbarEl.offsetHeight}px`);
+      document.documentElement.style.setProperty("--page-padding", `${appPadY + appGap}px`);
+      document.documentElement.style.setProperty("--content-padding", `${contentPadY}px`);
+    }
+
     tabButtons.forEach((btn) => {
       btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
     });
+
+    updateCaptureLayoutVars();
+    window.addEventListener("resize", updateCaptureLayoutVars);
 
     function setListening(enabled) {
       listenEnabled = !!enabled;
@@ -491,6 +748,17 @@
       setListening(!listenEnabled);
     });
 
+    if (beepToggle) {
+      beepToggle.addEventListener("change", () => {
+        beepEnabled = beepToggle.checked;
+        if (beepEnabled) {
+          lastBeepTagTime = latestTagTime || lastBeepTagTime;
+          lastBeepLabelTime = latestNumberTime || lastBeepLabelTime;
+          ensureAudioContext();
+        }
+      });
+    }
+
     async function fetchJson(url, options) {
       const resp = await fetch(url, options);
       const data = await resp.json().catch(() => null);
@@ -501,17 +769,96 @@
       return data;
     }
 
-    function renderTags(tags) {
-      const MAX_RENDER = 50;
-      const shown = tags.slice(0, MAX_RENDER);
-      tagsContainer.innerHTML = "";
+    let audioContext = null;
 
-      for (const tag of shown) {
+    function ensureAudioContext() {
+      if (!audioContext) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return null;
+        audioContext = new AudioCtx();
+      }
+      if (audioContext.state === "suspended") {
+        audioContext.resume().catch(() => {});
+      }
+      return audioContext;
+    }
+
+    function playBeep(frequency, durationMs) {
+      if (!beepEnabled) return;
+      const ctx = ensureAudioContext();
+      if (!ctx) return;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = frequency || 880;
+      osc.type = "sine";
+      gain.gain.value = 0.08;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + (durationMs || 0.08));
+    }
+
+    function validateLabelInput(label) {
+      const trimmed = (label || "").trim();
+      if (!trimmed) return { ok: true, value: "" };
+      if (!/^\d+$/.test(trimmed)) {
+        return { ok: false, message: "Label must contain digits only." };
+      }
+      if (targetDigits && trimmed.length !== targetDigits) {
+        return { ok: false, message: `Label must be ${targetDigits} digits.` };
+      }
+      return { ok: true, value: trimmed };
+    }
+
+    function renderTags(items) {
+      const MAX_RENDER = 50;
+      const safeItems = Array.isArray(items) ? items : [];
+      const shown = safeItems.slice(0, MAX_RENDER);
+      tagsContainer.innerHTML = "";
+      tagsCache.clear();
+
+      for (const item of safeItems) {
+        const tag = String(item.tag || "");
+        if (!tag) continue;
+        tagsCache.set(tag, String(item.label || ""));
+      }
+
+      for (const item of shown) {
+        const tag = String(item.tag || "");
+        if (!tag) continue;
+        const label = String(item.label || "");
         const chip = document.createElement("div");
         chip.className = "chip";
 
         const text = document.createElement("span");
-        text.textContent = tag;
+        const labelText = label ? label : "(no label)";
+        text.textContent = `${tag} - ${labelText}`;
+
+        const edit = document.createElement("button");
+        edit.type = "button";
+        edit.textContent = "edit";
+        edit.title = "Edit label";
+        edit.addEventListener("click", async () => {
+          const promptLabel = targetDigits ? `Enter ${targetDigits}-digit label for ${tag}` : `Enter label for ${tag}`;
+          const nextLabel = window.prompt(promptLabel, label);
+          if (nextLabel === null) return;
+          const validation = validateLabelInput(nextLabel);
+          if (!validation.ok) {
+            tagsStatus.textContent = validation.message;
+            return;
+          }
+          tagsStatus.textContent = "";
+          try {
+            await fetchJson("/api/tags", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tag, label: validation.value }),
+            });
+            await refreshTags();
+          } catch (e) {
+            tagsStatus.textContent = String(e.message || e);
+          }
+        });
 
         const del = document.createElement("button");
         del.type = "button";
@@ -527,18 +874,28 @@
         });
 
         chip.appendChild(text);
+        chip.appendChild(edit);
         chip.appendChild(del);
         tagsContainer.appendChild(chip);
       }
 
-      const extra = tags.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${tags.length})` : "";
-      tagsMeta.textContent = `Approved tags: ${tags.length}${extra}`;
+      const extra = safeItems.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${safeItems.length})` : "";
+      tagsMeta.textContent = `Approved tags: ${safeItems.length}${extra}`;
     }
 
     async function refreshTags() {
       try {
         const data = await fetchJson("/api/tags");
-        renderTags(data.tags || []);
+        if (Number.isFinite(Number(data.target_digits))) {
+          applyTargetDigits(Number(data.target_digits));
+        }
+        if (Array.isArray(data.items)) {
+          renderTags(data.items);
+        } else if (Array.isArray(data.tags)) {
+          renderTags(data.tags.map((tag) => ({ tag, label: "" })));
+        } else {
+          renderTags([]);
+        }
       } catch (e) {
         tagsStatus.textContent = String(e.message || e);
       }
@@ -547,15 +904,26 @@
     async function addTag() {
       const tag = tagInput.value.trim();
       if (!tag) return;
+      const labelRaw = labelInput ? labelInput.value.trim() : "";
+      const validation = validateLabelInput(labelRaw);
+      if (!validation.ok) {
+        tagsStatus.textContent = validation.message;
+        return;
+      }
       addTagBtn.disabled = true;
       tagsStatus.textContent = "";
       try {
+        const payload = { tag };
+        if (validation.value) {
+          payload.label = validation.value;
+        }
         await fetchJson("/api/tags", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tag }),
+          body: JSON.stringify(payload),
         });
         tagInput.value = "";
+        if (labelInput) labelInput.value = "";
         await refreshTags();
       } catch (e) {
         tagsStatus.textContent = String(e.message || e);
@@ -568,6 +936,11 @@
     tagInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") addTag();
     });
+    if (labelInput) {
+      labelInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") addTag();
+      });
+    }
 
     async function submitCapture() {
       submitBtn.disabled = true;
@@ -611,11 +984,18 @@
           tdInfo.textContent = `${ev.tag || ""}${ev.approved ? " (approved)" : " (not approved)"}`;
         } else if (ev.type === "number") {
           tdInfo.textContent = `${ev.tag || ""} -> ${ev.number || ""} (attempt ${ev.attempt || 0})`;
+        } else if (ev.type === "mismatch") {
+          tdInfo.textContent = `${ev.tag || ""} expected ${ev.expected || ""} detected ${ev.detected || ""}`;
+        } else if (ev.type === "resolved") {
+          tdInfo.textContent = `${ev.tag || ""} -> ${ev.resolved_tag || ""} (${ev.detected_label || ""})`;
         } else if (ev.type === "timeout") {
           tdInfo.textContent = `${ev.tag || ""} (timeout, attempt ${ev.attempt || 0})`;
         } else if (ev.type === "submitted") {
           const loc = ev.path ? `saved ${ev.path}` : "submitted";
-          tdInfo.textContent = `${ev.tag || ""} -> ${ev.number || ""} ${loc}`;
+          const original = ev.tag_original ? ` (was ${ev.tag_original})` : "";
+          const labelInfo = ev.label_detected ? ` label ${ev.label_detected}` : "";
+          const matchInfo = ev.label_match === false ? " (mismatch)" : "";
+          tdInfo.textContent = `${ev.tag || ""}${original} -> ${ev.number || ""}${labelInfo}${matchInfo} ${loc}`;
         } else if (ev.type === "cooldown") {
           tdInfo.textContent = `${ev.tag || ""} cooling until ${ev.cooldown_until_iso || ""}`;
         } else if (ev.type === "blocked") {
@@ -634,6 +1014,12 @@
         tr.innerHTML = '<td colspan="3" style="color: var(--muted); border-top: 0;">No events yet.</td>';
         eventsBody.appendChild(tr);
       }
+    }
+
+    function setIndicator(el, state) {
+      if (!el) return;
+      el.classList.toggle("on", state === "on");
+      el.classList.toggle("warn", state === "warn");
     }
 
     async function pollStatus() {
@@ -663,27 +1049,66 @@
         lastTag.textContent = r.last_tag || "-";
         lastApproved.textContent = r.last_tag ? (r.last_tag_approved ? "YES" : "NO") : "-";
         queueSize.textContent = String(r.queue_size ?? 0);
+        latestTagTime = Number(r.last_tag_time || 0);
+        latestNumberTime = Number(c.number_time || 0);
 
         capState.textContent = c.state || "idle";
         capTag.textContent = c.tag || "-";
+        const effectiveTag = c.effective_tag || c.resolved_tag || c.tag || "";
+        if (effectiveTag) {
+          const baseTag = c.tag && c.tag !== effectiveTag ? ` (was ${c.tag})` : "";
+          capEffective.textContent = `${effectiveTag}${baseTag}`;
+        } else {
+          capEffective.textContent = "-";
+        }
+        const hasTag = !!c.tag;
+        capExpected.textContent = hasTag ? (c.label_expected ? c.label_expected : "(no label)") : "-";
+        capDetected.textContent = hasTag ? (c.label_detected ? c.label_detected : "-") : "-";
         capAttempt.textContent = String(c.attempt ?? 0);
         capMsg.textContent = c.message || "-";
-        capNumber.textContent = c.number ? c.number : "-----";
+        const detectedNumber = c.label_detected || c.number || "";
+        capNumber.textContent = detectedNumber ? detectedNumber : "-----";
 
         const secMsg = c.secondary_message || "";
-        if (c.state === "running") capSub.textContent = "Capturing until 5 digits...";
-        else if (c.state === "awaiting_submit") capSub.textContent = "Captured digits. Submit required." + (secMsg ? ` Secondary: ${secMsg}` : "");
+        if (c.state === "running") {
+          capSub.textContent = targetDigits ? `Capturing until ${targetDigits} digits...` : "Capturing until target digits...";
+        }
+        else if (c.state === "awaiting_submit") {
+          const mismatch = c.label_match === false;
+          const blocked = mismatch && requireLabelMatch;
+          let base = "Captured digits. Submit required.";
+          if (blocked) {
+            base = "Captured digits. Label mismatch; submit blocked.";
+          } else if (mismatch) {
+            base = "Captured digits. Label mismatch; submit allowed.";
+          }
+          capSub.textContent = base + (secMsg ? ` Secondary: ${secMsg}` : "");
+        }
         else if (c.state === "submitted") capSub.textContent = "Submitted. Ready for next tag." + (secMsg ? ` Secondary: ${secMsg}` : "");
         else if (c.state === "success") capSub.textContent = "Done.";
         else if (c.state === "failed") capSub.textContent = "Failed.";
         else capSub.textContent = "Waiting for approved RFID tag...";
 
         const awaitingSubmit = !!c.awaiting_submit;
-        submitBtn.disabled = !awaitingSubmit;
+        const labelMismatch = c.label_match === false;
+        const blockedByMatch = requireLabelMatch && labelMismatch;
+        submitBtn.disabled = !awaitingSubmit || blockedByMatch;
+
+        const labelMessage = c.warning_message || c.label_message || "";
+        if (labelMessage) {
+          const warn = c.label_match === false || (!c.label_expected && labelMessage);
+          capWarning.textContent = labelMessage;
+          capWarning.classList.toggle("warn", warn);
+        } else {
+          capWarning.textContent = "No warnings.";
+          capWarning.classList.remove("warn");
+        }
 
         const savedPath = c.submitted_path || "";
         const prefixHint = c.submitted_prefix ? `${c.submitted_prefix}.json` : "";
-        if (awaitingSubmit) {
+        if (awaitingSubmit && blockedByMatch) {
+          submitStatus.textContent = "Submit blocked: label mismatch or ambiguous match.";
+        } else if (awaitingSubmit) {
           submitStatus.textContent = "Ready to submit captured data.";
         } else if (c.state === "submitted" && (savedPath || prefixHint)) {
           submitStatus.textContent = `Saved: ${savedPath || prefixHint}`;
@@ -711,6 +1136,37 @@
 
         renderEvents(data.events || []);
 
+        const isRfidConnected = !!(r.enabled && r.connected);
+        setIndicator(indRfid, isRfidConnected ? "on" : "off");
+        const tagFresh = latestTagTime && data.server_time
+          ? (data.server_time - latestTagTime) <= safePresentWindowSeconds
+          : false;
+        setIndicator(indTag, tagFresh ? "on" : "off");
+        const labelDetected = !!(c.label_detected || c.number);
+        setIndicator(indLabel, labelDetected ? "on" : "off");
+        if (labelDetected && c.label_match === false) {
+          setIndicator(indMatch, "warn");
+        } else if (labelDetected) {
+          setIndicator(indMatch, "on");
+        } else {
+          setIndicator(indMatch, "off");
+        }
+
+        if (beepEnabled) {
+          if (lastBeepTagTime === 0 && latestTagTime) {
+            lastBeepTagTime = latestTagTime;
+          } else if (latestTagTime && latestTagTime > lastBeepTagTime) {
+            playBeep(720, 0.07);
+            lastBeepTagTime = latestTagTime;
+          }
+          if (lastBeepLabelTime === 0 && latestNumberTime) {
+            lastBeepLabelTime = latestNumberTime;
+          } else if (latestNumberTime && latestNumberTime > lastBeepLabelTime) {
+            playBeep(980, 0.09);
+            lastBeepLabelTime = latestNumberTime;
+          }
+        }
+
         if (activeTab === "tags" && listenEnabled && r.enabled) {
           const tag = (r.last_tag || "").trim();
           const tagTime = Number(r.last_tag_time || 0);
@@ -719,27 +1175,19 @@
           if (tag && tagTime && tagTime > lastScannedTime) {
             lastScannedTime = tagTime;
             tagInput.value = tag;
-            tagsStatus.textContent = tagApproved ? `Scanned: ${tag} (already approved)` : `Scanned: ${tag}`;
-
-            if (!tagApproved) {
-              try {
-                await fetchJson("/api/tags", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ tag }),
-                });
-                tagsStatus.textContent = `Added: ${tag}`;
-                await refreshTags();
-              } catch (e) {
-                tagsStatus.textContent = `Add failed: ${String(e.message || e)}`;
-              }
-            }
+            tagsStatus.textContent = tagApproved
+              ? `Scanned: ${tag} (already approved)`
+              : `Scanned: ${tag} (enter label then click Add)`;
           }
         }
       } catch (e) {
         connDot.classList.remove("ok");
         connText.textContent = "Server: not reachable";
         listenBtn.disabled = true;
+        setIndicator(indRfid, "off");
+        setIndicator(indTag, "off");
+        setIndicator(indLabel, "off");
+        setIndicator(indMatch, "off");
       } finally {
         pollInFlight = false;
       }
@@ -748,7 +1196,7 @@
     setListening(false);
     refreshTags();
     pollStatus();
-    setInterval(pollStatus, 1000);
+    setInterval(pollStatus, safePollIntervalMs);
   </script>
 </body>
 </html>
