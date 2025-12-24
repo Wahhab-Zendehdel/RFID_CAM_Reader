@@ -1,6 +1,6 @@
 {
   "camera": {
-    "host": "192.168.1.111",
+    "host": "192.168.1.3",
     "port": 554,
     "username": "user1",
     "password": "Admin123456",

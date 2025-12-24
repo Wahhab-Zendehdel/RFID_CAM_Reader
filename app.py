@@ -26,7 +26,7 @@ APP_CONFIG_PATH = BASE_DIR / "config.json"
 
 DEFAULT_APP_CONFIG = {
     "camera": {
-        "host": "192.168.1.111",
+        "host": "192.168.1.3",
         "port": 554,
         "username": "user1",
         "password": "Admin123456",
@@ -34,7 +34,7 @@ DEFAULT_APP_CONFIG = {
         "rtsp_url": "",
     },
     "secondary_camera": {
-        "host": "192.168.1.173",
+        "host": "192.168.1.4",
         "port": 554,
         "username": "user1",
         "path": "/live/0/main",
