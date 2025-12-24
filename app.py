@@ -44,6 +44,10 @@ DEFAULT_APP_CONFIG = {
         "fps": None,
         "auto_exposure": None,
         "exposure": None,
+        "open_timeout_seconds": 5.0,
+        "retry_seconds": 1.0,
+        "stale_seconds": 5.0,
+        "fail_threshold": 5,
     },
     "secondary_camera": {
         "index": None,
@@ -58,11 +62,18 @@ DEFAULT_APP_CONFIG = {
         "fps": None,
         "auto_exposure": None,
         "exposure": None,
+        "open_timeout_seconds": 5.0,
+        "retry_seconds": 1.5,
+        "stale_seconds": 6.0,
+        "fail_threshold": 5,
     },
     "rfid": {
         "host": "192.168.1.2",
         "port": 6000,
         "reconnect_seconds": 2.0,
+        "stale_seconds": 6.0,
+        "connect_timeout_seconds": 5.0,
+        "read_timeout_seconds": 1.0,
         "debounce_seconds": 1.0,
         "present_window_seconds": 2.0,
         "queue_maxsize": 50,
@@ -93,6 +104,7 @@ DEFAULT_APP_CONFIG = {
     },
     "ui": {
         "beep_on_detection_default": False,
+        "status_poll_ms": 1000,
         "poll_interval_ms": 1000,
     },
 }
@@ -250,11 +262,24 @@ APPROVED_TAGS_PATH = BASE_DIR / "approved_tags.json"
 RFID_HOST = _env_str("RFID_HOST") or str(rfid_cfg.get("host") or "").strip()
 RFID_PORT = _env_int("RFID_PORT") or int(rfid_cfg.get("port") or 6000)
 RFID_RECONNECT_SECONDS = _env_float("RFID_RECONNECT_SECONDS") or float(rfid_cfg.get("reconnect_seconds") or 2.0)
+RFID_STALE_SECONDS = _env_float("RFID_STALE_SECONDS") or float(rfid_cfg.get("stale_seconds") or 0.0)
+RFID_CONNECT_TIMEOUT_SECONDS = (
+    _env_float("RFID_CONNECT_TIMEOUT_SECONDS") or float(rfid_cfg.get("connect_timeout_seconds") or 5.0)
+)
+RFID_READ_TIMEOUT_SECONDS = (
+    _env_float("RFID_READ_TIMEOUT_SECONDS") or float(rfid_cfg.get("read_timeout_seconds") or 1.0)
+)
 RFID_DEBOUNCE_SECONDS = _env_float("RFID_DEBOUNCE_SECONDS") or float(rfid_cfg.get("debounce_seconds") or 1.0)
 RFID_QUEUE_MAXSIZE = int(_env_int("RFID_QUEUE_MAXSIZE") or (rfid_cfg.get("queue_maxsize") or 50))
 RFID_PRESENCE_WINDOW_SECONDS = float(
     _env_float("RFID_PRESENCE_WINDOW_SECONDS") or float(rfid_cfg.get("present_window_seconds") or 2.0)
 )
+CAMERA_RETRY_SECONDS = float(camera_cfg.get("retry_seconds") or 1.0)
+CAMERA_STALE_SECONDS = float(camera_cfg.get("stale_seconds") or 0.0)
+CAMERA_FAIL_THRESHOLD = int(camera_cfg.get("fail_threshold") or 5)
+SECONDARY_CAMERA_RETRY_SECONDS = float(secondary_camera_cfg.get("retry_seconds") or CAMERA_RETRY_SECONDS)
+SECONDARY_CAMERA_STALE_SECONDS = float(secondary_camera_cfg.get("stale_seconds") or CAMERA_STALE_SECONDS)
+SECONDARY_CAMERA_FAIL_THRESHOLD = int(secondary_camera_cfg.get("fail_threshold") or CAMERA_FAIL_THRESHOLD)
 TAG_COOLDOWN_SECONDS = float(os.environ.get("TAG_COOLDOWN_SECONDS", str(timing_cfg.get("tag_cooldown_seconds") or 3.0)))
 TAG_SUBMIT_COOLDOWN_SECONDS = float(
     os.environ.get("TAG_SUBMIT_COOLDOWN_SECONDS", str(timing_cfg.get("tag_submit_cooldown_seconds") or 300.0))
@@ -270,7 +295,7 @@ CAPTURE_TIMEOUT_SECONDS = _env_float("CAPTURE_TIMEOUT_SECONDS") or float(capture
 TARGET_DIGITS = int(capture_cfg.get("target_digits") or 5)
 REQUIRE_LABEL_MATCH_FOR_SUBMIT = bool(capture_cfg.get("require_label_match_for_submit", True))
 
-UI_POLL_INTERVAL_MS = int(ui_cfg.get("poll_interval_ms") or 1000)
+UI_POLL_INTERVAL_MS = int(ui_cfg.get("status_poll_ms") or ui_cfg.get("poll_interval_ms") or 1000)
 UI_BEEP_ON_DETECTION_DEFAULT = bool(ui_cfg.get("beep_on_detection_default", False))
 
 approved_tags_lock = threading.Lock()
@@ -510,6 +535,10 @@ rfid_status = {
     "host": RFID_HOST,
     "port": RFID_PORT,
     "connected": False,
+    "reconnecting": False,
+    "last_ok_ts": None,
+    "last_tag_ts": None,
+    "consecutive_failures": 0,
     "last_error": "",
     "last_tag": "",
     "last_tag_time": None,
@@ -735,6 +764,13 @@ def _append_event(event: dict) -> None:
             del event_log[:-EVENT_LOG_MAX]
 
 
+def _log_event(event_type: str, **fields) -> None:
+    now = time.time()
+    payload = {"type": event_type, "time": now, "time_iso": _utc_iso(now)}
+    payload.update(fields)
+    _append_event(payload)
+
+
 def _clear_rfid_queue() -> int:
     """Drain the RFID event queue (used when waiting for manual submit)."""
     cleared = 0
@@ -785,6 +821,8 @@ def _handle_rfid_tag(raw_tag: str, source: str) -> None:
 
         rfid_status["last_tag"] = tag
         rfid_status["last_tag_time"] = now
+        rfid_status["last_tag_ts"] = now
+        rfid_status["last_ok_ts"] = now
         rfid_status["last_tag_source"] = source
 
         last_seen = rfid_last_seen_by_tag.get(tag)
@@ -881,6 +919,8 @@ def rfid_listener():
         return
 
     buf = bytearray()
+    was_connected = False
+    was_reconnecting = False
     while rfid_running:
         sock = None
         try:
@@ -889,11 +929,27 @@ def rfid_listener():
                 rfid_status["host"] = RFID_HOST
                 rfid_status["port"] = RFID_PORT
                 rfid_status["last_error"] = ""
+                rfid_status["reconnecting"] = True
+            if not was_reconnecting:
+                _log_event("rfid_reconnecting", host=RFID_HOST, port=RFID_PORT)
+                was_reconnecting = True
 
-            sock = listen_only.connect(RFID_HOST, RFID_PORT, timeout=5.0)
+            sock = listen_only.connect(RFID_HOST, RFID_PORT, timeout=RFID_CONNECT_TIMEOUT_SECONDS)
+            try:
+                sock.settimeout(RFID_READ_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+            now = time.time()
             with state_lock:
                 rfid_status["connected"] = True
+                rfid_status["reconnecting"] = False
                 rfid_status["last_error"] = ""
+                rfid_status["last_ok_ts"] = now
+                rfid_status["consecutive_failures"] = 0
+            if not was_connected:
+                _log_event("rfid_connected", host=RFID_HOST, port=RFID_PORT)
+                was_connected = True
+                was_reconnecting = False
 
             buf.clear()
 
@@ -901,21 +957,42 @@ def rfid_listener():
                 try:
                     chunk = sock.recv(4096)
                 except socket.timeout:
+                    if RFID_STALE_SECONDS:
+                        with state_lock:
+                            last_ok = rfid_status.get("last_ok_ts") or 0.0
+                        if last_ok and (time.time() - last_ok) > RFID_STALE_SECONDS:
+                            raise TimeoutError("RFID stale (no data)")
                     continue
 
                 if not chunk:
                     raise ConnectionError("Device closed connection")
 
+                now = time.time()
+                with state_lock:
+                    rfid_status["last_ok_ts"] = now
                 buf.extend(chunk)
 
                 for tag, source in listen_only.tags_from_buffer(buf):
                     _handle_rfid_tag(tag, source)
 
         except Exception as e:
+            err = str(e)
             with state_lock:
                 rfid_status["connected"] = False
-                rfid_status["last_error"] = str(e)
-            time.sleep(RFID_RECONNECT_SECONDS)
+                rfid_status["reconnecting"] = True
+                rfid_status["last_error"] = err
+                rfid_status["consecutive_failures"] = int(rfid_status.get("consecutive_failures") or 0) + 1
+                failures = rfid_status["consecutive_failures"]
+            if was_connected:
+                _log_event("rfid_disconnected", error=err)
+                was_connected = False
+            if not was_reconnecting:
+                _log_event("rfid_reconnecting", error=err)
+                was_reconnecting = True
+            backoff = max(0.2, RFID_RECONNECT_SECONDS * max(1, min(failures, 5)))
+            with state_lock:
+                rfid_status["last_error"] = err
+            time.sleep(backoff)
         finally:
             if sock is not None:
                 try:
@@ -1015,8 +1092,12 @@ camera_status = {
     "enabled": CAMERA_ENABLED,
     "rtsp_url": camera_source_label,
     "connected": False,
+    "reconnecting": False,
+    "last_ok_ts": None,
     "last_error": "",
     "last_frame_time": None,
+    "last_frame_ts": None,
+    "consecutive_failures": 0,
 }
 
 cap = None
@@ -1030,8 +1111,12 @@ secondary_camera_status = {
     "enabled": SECONDARY_CAMERA_ENABLED,
     "rtsp_url": secondary_source_label,
     "connected": False,
+    "reconnecting": False,
+    "last_ok_ts": None,
     "last_error": "",
     "last_frame_time": None,
+    "last_frame_ts": None,
+    "consecutive_failures": 0,
 }
 
 cap_secondary = None
@@ -1092,26 +1177,47 @@ def rtsp_reader():
     Continuously read frames from RTSP and keep the latest one.
     """
     global latest_frame, cap
+    was_connected = False
+    was_reconnecting = False
     while reader_running:
         if not CAMERA_ENABLED:
             with state_lock:
                 camera_status["enabled"] = False
                 camera_status["connected"] = False
+                camera_status["reconnecting"] = False
                 camera_status["last_error"] = "Camera disabled (missing camera config)"
+            if was_connected:
+                _log_event("camera_primary_lost", error="Camera disabled")
+                was_connected = False
             time.sleep(0.5)
             continue
 
         if cap is None or not cap.isOpened():
+            with state_lock:
+                camera_status["reconnecting"] = True
+                camera_status["connected"] = False
+            if not was_reconnecting:
+                _log_event("camera_primary_reconnecting", error=camera_status.get("last_error") or "")
+                was_reconnecting = True
             ok_open = _open_camera()
+            now = time.time()
             with state_lock:
                 camera_status["enabled"] = True
                 camera_status["rtsp_url"] = camera_source_label
                 camera_status["connected"] = bool(ok_open)
+                camera_status["reconnecting"] = not ok_open
                 camera_status["last_error"] = "" if ok_open else f"Failed to open stream: {camera_source_label}"
+                if ok_open:
+                    camera_status["last_ok_ts"] = now
+                    camera_status["consecutive_failures"] = 0
 
             if not ok_open:
-                time.sleep(1.0)
+                time.sleep(CAMERA_RETRY_SECONDS)
                 continue
+            if not was_connected:
+                _log_event("camera_primary_connected", source=camera_source_label)
+                was_connected = True
+                was_reconnecting = False
 
         try:
             ok, frame = cap.read()
@@ -1128,14 +1234,67 @@ def rtsp_reader():
             now = time.time()
             with state_lock:
                 camera_status["connected"] = True
+                camera_status["reconnecting"] = False
                 camera_status["last_error"] = ""
                 camera_status["last_frame_time"] = now
+                camera_status["last_frame_ts"] = now
+                camera_status["last_ok_ts"] = now
+                camera_status["consecutive_failures"] = 0
+            if not was_connected:
+                _log_event("camera_primary_connected", source=camera_source_label)
+                was_connected = True
+            was_reconnecting = False
         else:
+            with state_lock:
+                failures = int(camera_status.get("consecutive_failures") or 0) + 1
+                camera_status["consecutive_failures"] = failures
+                err = camera_status.get("last_error") or "Failed to read frame"
+                camera_status["last_error"] = err
+            if failures >= CAMERA_FAIL_THRESHOLD:
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+                cap = None
+                with state_lock:
+                    camera_status["connected"] = False
+                    camera_status["reconnecting"] = True
+                if was_connected:
+                    _log_event("camera_primary_lost", error=err)
+                    was_connected = False
+                if not was_reconnecting:
+                    _log_event("camera_primary_reconnecting", error=err)
+                    was_reconnecting = True
+                time.sleep(CAMERA_RETRY_SECONDS)
+                continue
             with state_lock:
                 camera_status["connected"] = False
                 if not camera_status.get("last_error"):
                     camera_status["last_error"] = "Failed to read frame"
             time.sleep(0.1)
+
+        if CAMERA_STALE_SECONDS:
+            with state_lock:
+                last_frame_ts = camera_status.get("last_frame_ts")
+            if last_frame_ts and (time.time() - last_frame_ts) > CAMERA_STALE_SECONDS:
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+                cap = None
+                with state_lock:
+                    camera_status["connected"] = False
+                    camera_status["reconnecting"] = True
+                    camera_status["last_error"] = "Camera stale"
+                if was_connected:
+                    _log_event("camera_primary_lost", error="Camera stale")
+                    was_connected = False
+                if not was_reconnecting:
+                    _log_event("camera_primary_reconnecting", error="Camera stale")
+                    was_reconnecting = True
+                time.sleep(CAMERA_RETRY_SECONDS)
 
 
 reader_thread = threading.Thread(target=rtsp_reader, daemon=True)
@@ -1169,26 +1328,47 @@ def secondary_rtsp_reader():
     No detection; used for context capture after OCR success.
     """
     global secondary_frame, cap_secondary
+    was_connected = False
+    was_reconnecting = False
     while secondary_reader_running:
         if not SECONDARY_CAMERA_ENABLED:
             with state_lock:
                 secondary_camera_status["enabled"] = False
                 secondary_camera_status["connected"] = False
+                secondary_camera_status["reconnecting"] = False
                 secondary_camera_status["last_error"] = "Secondary camera disabled (missing camera config)"
+            if was_connected:
+                _log_event("camera_secondary_lost", error="Secondary camera disabled")
+                was_connected = False
             time.sleep(1.0)
             continue
 
         if cap_secondary is None or not cap_secondary.isOpened():
+            with state_lock:
+                secondary_camera_status["reconnecting"] = True
+                secondary_camera_status["connected"] = False
+            if not was_reconnecting:
+                _log_event("camera_secondary_reconnecting", error=secondary_camera_status.get("last_error") or "")
+                was_reconnecting = True
             ok_open = _open_secondary_camera()
+            now = time.time()
             with state_lock:
                 secondary_camera_status["enabled"] = True
                 secondary_camera_status["rtsp_url"] = secondary_source_label
                 secondary_camera_status["connected"] = bool(ok_open)
+                secondary_camera_status["reconnecting"] = not ok_open
                 secondary_camera_status["last_error"] = "" if ok_open else f"Failed to open stream: {secondary_source_label}"
+                if ok_open:
+                    secondary_camera_status["last_ok_ts"] = now
+                    secondary_camera_status["consecutive_failures"] = 0
 
             if not ok_open:
-                time.sleep(1.5)
+                time.sleep(SECONDARY_CAMERA_RETRY_SECONDS)
                 continue
+            if not was_connected:
+                _log_event("camera_secondary_connected", source=secondary_source_label)
+                was_connected = True
+                was_reconnecting = False
 
         try:
             ok, frame = cap_secondary.read()
@@ -1205,14 +1385,67 @@ def secondary_rtsp_reader():
             now = time.time()
             with state_lock:
                 secondary_camera_status["connected"] = True
+                secondary_camera_status["reconnecting"] = False
                 secondary_camera_status["last_error"] = ""
                 secondary_camera_status["last_frame_time"] = now
+                secondary_camera_status["last_frame_ts"] = now
+                secondary_camera_status["last_ok_ts"] = now
+                secondary_camera_status["consecutive_failures"] = 0
+            if not was_connected:
+                _log_event("camera_secondary_connected", source=secondary_source_label)
+                was_connected = True
+            was_reconnecting = False
         else:
+            with state_lock:
+                failures = int(secondary_camera_status.get("consecutive_failures") or 0) + 1
+                secondary_camera_status["consecutive_failures"] = failures
+                err = secondary_camera_status.get("last_error") or "Failed to read frame"
+                secondary_camera_status["last_error"] = err
+            if failures >= SECONDARY_CAMERA_FAIL_THRESHOLD:
+                try:
+                    if cap_secondary is not None:
+                        cap_secondary.release()
+                except Exception:
+                    pass
+                cap_secondary = None
+                with state_lock:
+                    secondary_camera_status["connected"] = False
+                    secondary_camera_status["reconnecting"] = True
+                if was_connected:
+                    _log_event("camera_secondary_lost", error=err)
+                    was_connected = False
+                if not was_reconnecting:
+                    _log_event("camera_secondary_reconnecting", error=err)
+                    was_reconnecting = True
+                time.sleep(SECONDARY_CAMERA_RETRY_SECONDS)
+                continue
             with state_lock:
                 secondary_camera_status["connected"] = False
                 if not secondary_camera_status.get("last_error"):
                     secondary_camera_status["last_error"] = "Failed to read frame"
             time.sleep(0.2)
+
+        if SECONDARY_CAMERA_STALE_SECONDS:
+            with state_lock:
+                last_frame_ts = secondary_camera_status.get("last_frame_ts")
+            if last_frame_ts and (time.time() - last_frame_ts) > SECONDARY_CAMERA_STALE_SECONDS:
+                try:
+                    if cap_secondary is not None:
+                        cap_secondary.release()
+                except Exception:
+                    pass
+                cap_secondary = None
+                with state_lock:
+                    secondary_camera_status["connected"] = False
+                    secondary_camera_status["reconnecting"] = True
+                    secondary_camera_status["last_error"] = "Secondary camera stale"
+                if was_connected:
+                    _log_event("camera_secondary_lost", error="Secondary camera stale")
+                    was_connected = False
+                if not was_reconnecting:
+                    _log_event("camera_secondary_reconnecting", error="Secondary camera stale")
+                    was_reconnecting = True
+                time.sleep(SECONDARY_CAMERA_RETRY_SECONDS)
 
 
 secondary_reader_thread = threading.Thread(target=secondary_rtsp_reader, daemon=True)
@@ -1727,7 +1960,8 @@ def api_status():
     with state_lock:
         rfid = dict(rfid_status)
         capture = dict(capture_status)
-        secondary_cam = dict(secondary_camera_status)
+        cam_primary = dict(camera_status)
+        cam_secondary = dict(secondary_camera_status)
         events = list(event_log[-10:])
         queue_size = rfid_event_queue.qsize()
 
@@ -1747,11 +1981,40 @@ def api_status():
 
     if rfid.get("last_tag_time") is not None:
         rfid["last_tag_time_iso"] = _utc_iso(rfid["last_tag_time"])
+    if rfid.get("last_ok_ts") is not None:
+        rfid["last_ok_ts_iso"] = _utc_iso(rfid["last_ok_ts"])
+        rfid["seconds_since_last_ok"] = max(0.0, now - float(rfid["last_ok_ts"]))
+    last_tag_ts = rfid.get("last_tag_ts") or rfid.get("last_tag_time")
+    if last_tag_ts is not None:
+        rfid["last_tag_ts"] = last_tag_ts
+        rfid["last_tag_ts_iso"] = _utc_iso(last_tag_ts)
+        rfid["seconds_since_last_tag"] = max(0.0, now - float(last_tag_ts))
+    if RFID_STALE_SECONDS and rfid.get("last_ok_ts"):
+        rfid["stale"] = (now - float(rfid["last_ok_ts"])) > RFID_STALE_SECONDS
+    else:
+        rfid["stale"] = False
 
     if capture.get("started_time") is not None:
         capture["started_time_iso"] = _utc_iso(capture["started_time"])
     if capture.get("number_time") is not None:
         capture["number_time_iso"] = _utc_iso(capture["number_time"])
+
+    for cam in (cam_primary, cam_secondary):
+        if cam.get("last_frame_time") is not None:
+            cam["last_frame_time_iso"] = _utc_iso(cam["last_frame_time"])
+        if cam.get("last_frame_ts") is not None:
+            cam["last_frame_ts_iso"] = _utc_iso(cam["last_frame_ts"])
+            cam["seconds_since_last_frame"] = max(0.0, now - float(cam["last_frame_ts"]))
+
+    if CAMERA_STALE_SECONDS and cam_primary.get("last_frame_ts"):
+        cam_primary["stale"] = (now - float(cam_primary["last_frame_ts"])) > CAMERA_STALE_SECONDS
+    else:
+        cam_primary["stale"] = False
+
+    if SECONDARY_CAMERA_STALE_SECONDS and cam_secondary.get("last_frame_ts"):
+        cam_secondary["stale"] = (now - float(cam_secondary["last_frame_ts"])) > SECONDARY_CAMERA_STALE_SECONDS
+    else:
+        cam_secondary["stale"] = False
 
     if not include_images:
         capture["original_b64"] = None
@@ -1764,7 +2027,8 @@ def api_status():
             "server_time_iso": _utc_iso(now),
             "approved_tags_count": approved_count,
             "rfid": rfid,
-            "secondary_camera": secondary_cam,
+            "cameras": {"primary": cam_primary, "secondary": cam_secondary},
+            "secondary_camera": cam_secondary,
             "capture": capture,
             "events": events,
         }

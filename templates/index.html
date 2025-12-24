@@ -14,6 +14,7 @@
       --accent: #2d8cff;
       --danger: #ff4d4d;
       --ok: #22c55e;
+      --amber: #f59e0b;
       --border: rgba(255, 255, 255, 0.08);
       --app-header-h: 56px;
       --page-padding: 28px;
@@ -97,6 +98,7 @@
     }
 
     .dot.ok { background: var(--ok); }
+    .dot.warn { background: var(--amber); }
 
     .content {
       flex: 1 1 auto;
@@ -441,6 +443,11 @@
       border-color: rgba(255, 77, 77, 0.6);
     }
 
+    .indicator-dot.amber {
+      background: var(--amber);
+      border-color: rgba(245, 158, 11, 0.6);
+    }
+
     .toggle {
       display: flex;
       align-items: center;
@@ -497,6 +504,7 @@
         grid-auto-rows: minmax(180px, 1fr);
       }
       .kv { grid-template-columns: 120px 1fr; }
+      .indicator-grid { flex-wrap: wrap; }
     }
   </style>
 </head>
@@ -608,10 +616,12 @@
               <div class="hint panel-heading">Warnings & indicators</div>
               <div class="warning-box" id="cap-warning">No warnings.</div>
               <div class="indicator-grid">
-                <div class="indicator-row"><span class="indicator-dot" id="ind-rfid"></span><span>RFID connected</span></div>
-                <div class="indicator-row"><span class="indicator-dot" id="ind-tag"></span><span>Tag detected</span></div>
-                <div class="indicator-row"><span class="indicator-dot" id="ind-label"></span><span>Label detected</span></div>
-                <div class="indicator-row"><span class="indicator-dot" id="ind-match"></span><span>Label match</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-rfid"></span><span title="RFID connection">RFID</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-cam-primary"></span><span title="Primary camera">Cam 1</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-cam-secondary"></span><span title="Secondary camera">Cam 2</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-tag"></span><span title="Tag detected">Tag</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-label"></span><span title="Label detected">Label</span></div>
+                <div class="indicator-row"><span class="indicator-dot" id="ind-match"></span><span title="Label match">Match</span></div>
               </div>
               <label class="toggle">
                 <input type="checkbox" id="beep-toggle" />
@@ -664,6 +674,8 @@
     const imgSecondary = document.getElementById("img-secondary");
     const eventsBody = document.getElementById("events");
     const indRfid = document.getElementById("ind-rfid");
+    const indCamPrimary = document.getElementById("ind-cam-primary");
+    const indCamSecondary = document.getElementById("ind-cam-secondary");
     const indTag = document.getElementById("ind-tag");
     const indLabel = document.getElementById("ind-label");
     const indMatch = document.getElementById("ind-match");
@@ -963,8 +975,9 @@
 
     submitBtn.addEventListener("click", submitCapture);
 
-    function setConn(connected, enabled, msg) {
-      connDot.classList.toggle("ok", !!connected);
+    function setConn(state, enabled, msg) {
+      connDot.classList.toggle("ok", state === "on");
+      connDot.classList.toggle("warn", state === "amber");
       connText.textContent = enabled ? msg : "RFID: disabled (set rfid.host in config.json)";
     }
 
@@ -990,6 +1003,24 @@
           tdInfo.textContent = `${ev.tag || ""} -> ${ev.resolved_tag || ""} (${ev.detected_label || ""})`;
         } else if (ev.type === "timeout") {
           tdInfo.textContent = `${ev.tag || ""} (timeout, attempt ${ev.attempt || 0})`;
+        } else if (ev.type === "rfid_connected") {
+          tdInfo.textContent = `connected ${ev.host || ""}:${ev.port || ""}`.trim();
+        } else if (ev.type === "rfid_disconnected") {
+          tdInfo.textContent = `disconnected${ev.error ? `: ${ev.error}` : ""}`;
+        } else if (ev.type === "rfid_reconnecting") {
+          tdInfo.textContent = `reconnecting${ev.error ? `: ${ev.error}` : ""}`;
+        } else if (ev.type === "camera_primary_connected") {
+          tdInfo.textContent = `camera 1 connected${ev.source ? ` (${ev.source})` : ""}`;
+        } else if (ev.type === "camera_primary_lost") {
+          tdInfo.textContent = `camera 1 lost${ev.error ? `: ${ev.error}` : ""}`;
+        } else if (ev.type === "camera_primary_reconnecting") {
+          tdInfo.textContent = `camera 1 reconnecting${ev.error ? `: ${ev.error}` : ""}`;
+        } else if (ev.type === "camera_secondary_connected") {
+          tdInfo.textContent = `camera 2 connected${ev.source ? ` (${ev.source})` : ""}`;
+        } else if (ev.type === "camera_secondary_lost") {
+          tdInfo.textContent = `camera 2 lost${ev.error ? `: ${ev.error}` : ""}`;
+        } else if (ev.type === "camera_secondary_reconnecting") {
+          tdInfo.textContent = `camera 2 reconnecting${ev.error ? `: ${ev.error}` : ""}`;
         } else if (ev.type === "submitted") {
           const loc = ev.path ? `saved ${ev.path}` : "submitted";
           const original = ev.tag_original ? ` (was ${ev.tag_original})` : "";
@@ -1020,6 +1051,24 @@
       if (!el) return;
       el.classList.toggle("on", state === "on");
       el.classList.toggle("warn", state === "warn");
+      el.classList.toggle("amber", state === "amber");
+    }
+
+    function resolveConnState(status) {
+      if (!status || status.enabled === false) return "off";
+      if (status.reconnecting || status.stale) return "amber";
+      if (status.connected) return "on";
+      return "warn";
+    }
+
+    function buildConnWarning(label, status) {
+      if (!status) return "";
+      const err = status.last_error ? `: ${status.last_error}` : "";
+      if (status.enabled === false) return err ? `${label} disabled${err}` : "";
+      if (status.reconnecting) return `${label} reconnecting${err}`;
+      if (!status.connected) return `${label} disconnected${err}`;
+      if (status.stale) return `${label} stale${err}`;
+      return "";
     }
 
     async function pollStatus() {
@@ -1031,18 +1080,26 @@
 
         const r = data.rfid || {};
         const c = data.capture || {};
+        const cams = data.cameras || {};
+        const camPrimary = cams.primary || {};
+        const camSecondary = cams.secondary || data.secondary_camera || {};
 
         approvedCount.textContent = `Approved tags: ${data.approved_tags_count || 0}`;
 
         if (!r.enabled) {
-          setConn(false, false, "");
+          setConn("off", false, "");
           listenBtn.disabled = true;
           if (listenEnabled) setListening(false);
-        } else if (r.connected) {
-          setConn(true, true, `RFID: connected (${r.host}:${r.port})`);
-          listenBtn.disabled = false;
         } else {
-          setConn(false, true, `RFID: disconnected (${r.host}:${r.port})`);
+          const rfidState = resolveConnState(r);
+          if (rfidState === "on") {
+            setConn("on", true, `RFID: connected (${r.host}:${r.port})`);
+          } else if (rfidState === "amber") {
+            const label = r.stale ? "stale" : "reconnecting";
+            setConn("amber", true, `RFID: ${label} (${r.host}:${r.port})`);
+          } else {
+            setConn("warn", true, `RFID: disconnected (${r.host}:${r.port})`);
+          }
           listenBtn.disabled = false;
         }
 
@@ -1095,9 +1152,25 @@
         submitBtn.disabled = !awaitingSubmit || blockedByMatch;
 
         const labelMessage = c.warning_message || c.label_message || "";
+        const warningLines = [];
+        let warn = false;
         if (labelMessage) {
-          const warn = c.label_match === false || (!c.label_expected && labelMessage);
-          capWarning.textContent = labelMessage;
+          warningLines.push(labelMessage);
+          warn = c.label_match === false || (!c.label_expected && labelMessage);
+        }
+        const connWarnings = [];
+        const rfidWarn = buildConnWarning("RFID", r);
+        if (rfidWarn) connWarnings.push(rfidWarn);
+        const cam1Warn = buildConnWarning("Camera 1", camPrimary);
+        if (cam1Warn) connWarnings.push(cam1Warn);
+        const cam2Warn = buildConnWarning("Camera 2", camSecondary);
+        if (cam2Warn) connWarnings.push(cam2Warn);
+        if (connWarnings.length) {
+          warningLines.push(connWarnings.join("\n"));
+          warn = true;
+        }
+        if (warningLines.length) {
+          capWarning.textContent = warningLines.join("\n");
           capWarning.classList.toggle("warn", warn);
         } else {
           capWarning.textContent = "No warnings.";
@@ -1136,8 +1209,12 @@
 
         renderEvents(data.events || []);
 
-        const isRfidConnected = !!(r.enabled && r.connected);
-        setIndicator(indRfid, isRfidConnected ? "on" : "off");
+        const rfidState = resolveConnState(r);
+        const camPrimaryState = resolveConnState(camPrimary);
+        const camSecondaryState = resolveConnState(camSecondary);
+        setIndicator(indRfid, rfidState === "off" ? "warn" : rfidState);
+        setIndicator(indCamPrimary, camPrimaryState === "off" ? "warn" : camPrimaryState);
+        setIndicator(indCamSecondary, camSecondaryState === "off" ? "warn" : camSecondaryState);
         const tagFresh = latestTagTime && data.server_time
           ? (data.server_time - latestTagTime) <= safePresentWindowSeconds
           : false;
@@ -1182,9 +1259,14 @@
         }
       } catch (e) {
         connDot.classList.remove("ok");
+        connDot.classList.remove("warn");
         connText.textContent = "Server: not reachable";
         listenBtn.disabled = true;
-        setIndicator(indRfid, "off");
+        capWarning.textContent = "Backend unreachable.";
+        capWarning.classList.add("warn");
+        setIndicator(indRfid, "warn");
+        setIndicator(indCamPrimary, "warn");
+        setIndicator(indCamSecondary, "warn");
         setIndicator(indTag, "off");
         setIndicator(indLabel, "off");
         setIndicator(indMatch, "off");

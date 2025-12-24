@@ -17,7 +17,11 @@
     "height": null,
     "fps": null,
     "auto_exposure": null,
-    "exposure": null
+    "exposure": null,
+    "open_timeout_seconds": 5.0,
+    "retry_seconds": 1.0,
+    "stale_seconds": 5.0,
+    "fail_threshold": 5
   },
   "secondary_camera": {
     "index": null,
@@ -31,12 +35,19 @@
     "height": null,
     "fps": null,
     "auto_exposure": null,
-    "exposure": null
+    "exposure": null,
+    "open_timeout_seconds": 5.0,
+    "retry_seconds": 1.5,
+    "stale_seconds": 6.0,
+    "fail_threshold": 5
   },
   "rfid": {
     "host": "192.168.1.2",
     "port": 6000,
     "reconnect_seconds": 2.0,
+    "stale_seconds": 6.0,
+    "connect_timeout_seconds": 5.0,
+    "read_timeout_seconds": 1.0,
     "debounce_seconds": 1.0,
     "present_window_seconds": 2.0,
     "queue_maxsize": 50
@@ -67,6 +78,7 @@
   },
   "ui": {
     "beep_on_detection_default": true,
+    "status_poll_ms": 1000,
     "poll_interval_ms": 1000
   }
 }
