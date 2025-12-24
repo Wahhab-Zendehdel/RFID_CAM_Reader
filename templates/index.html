@@ -336,6 +336,30 @@
       font-size: 12px;
     }
 
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .row-error {
+      color: var(--danger);
+      font-size: 11px;
+      margin-top: 4px;
+    }
+
+    .input-error {
+      border-color: var(--danger);
+    }
+
+    @media (max-width: 980px) {
+      .groups-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
     .chip button {
       border: 0;
       background: rgba(255, 255, 255, 0.08);
@@ -518,15 +542,18 @@
         </div>
 
         <div class="panel">
-          <div class="hint" style="margin-bottom: 8px;">Groups</div>
+          <div class="panel-header">
+            <div class="hint">Groups — Create / Edit Group</div>
+            <button class="secondary" id="group-refresh-btn" type="button">Refresh</button>
+          </div>
           <div class="groups-grid">
             <div>
               <div class="group-list" id="group-list"></div>
             </div>
             <div>
               <div class="row">
-                <input id="group-name" type="text" placeholder="Group name" />
-                <input id="group-id" type="text" placeholder="Group ID (e.g., G-001)" />
+                <input id="group-name" type="text" placeholder="Group name (required)" />
+                <input id="group-id" type="text" placeholder="Group ID (optional, e.g., G-001)" />
               </div>
               <div class="row" style="margin-top: 8px;">
                 <label style="display:flex; gap:6px; align-items:center; font-size:12px;">
@@ -543,16 +570,16 @@
 
               <div class="row" style="margin-top: 8px;">
                 <select id="group-add-tag" style="flex:1 1 auto; padding:10px; border-radius:10px; border:1px solid var(--border); background:rgba(255,255,255,0.04); color:var(--text);">
-                  <option value="">Add from approved tags...</option>
+                  <option value="">Add approved tag...</option>
                 </select>
-                <button class="secondary" id="group-add-tag-btn" type="button">Add Tag</button>
+                <button class="secondary" id="group-add-tag-btn" type="button">Add to Group</button>
               </div>
 
               <table class="pair-table" style="margin-top: 8px;">
                 <thead>
                   <tr>
                     <th>Tag</th>
-                    <th>Label</th>
+                    <th>Label (5 digits)</th>
                     <th></th>
                   </tr>
                 </thead>
@@ -561,8 +588,9 @@
 
               <div class="row" style="margin-top: 8px;">
                 <button class="secondary" id="group-add-row" type="button">Add Row</button>
-                <button class="primary" id="group-save" type="button">Create Group</button>
-                <button class="secondary" id="group-new" type="button">New</button>
+                <button class="primary" id="group-create" type="button">Create Group</button>
+                <button class="primary" id="group-update" type="button" style="display:none;">Update Group</button>
+                <button class="secondary" id="group-clear" type="button">Clear</button>
               </div>
               <div class="status" id="group-editor-status"></div>
             </div>
@@ -732,8 +760,10 @@
     const groupAddTagBtn = document.getElementById("group-add-tag-btn");
     const groupPairsBody = document.getElementById("group-pairs-body");
     const groupAddRowBtn = document.getElementById("group-add-row");
-    const groupSaveBtn = document.getElementById("group-save");
-    const groupNewBtn = document.getElementById("group-new");
+    const groupCreateBtn = document.getElementById("group-create");
+    const groupUpdateBtn = document.getElementById("group-update");
+    const groupClearBtn = document.getElementById("group-clear");
+    const groupRefreshBtn = document.getElementById("group-refresh-btn");
     const groupEditorStatus = document.getElementById("group-editor-status");
 
     let activeTab = "tags";
@@ -803,7 +833,7 @@
       return data;
     }
 
-    function extractTagEntries(data) {
+    function normalizeTagsResponse(data) {
       const labelMaps = {};
       if (data && typeof data === "object") {
         Object.assign(labelMaps, data.tag_labels || {});
@@ -817,8 +847,6 @@
         tagsRaw = data.tags;
       } else if (Array.isArray(data?.entries)) {
         tagsRaw = data.entries;
-      } else if (Array.isArray((data || {}).tags?.tags)) {
-        tagsRaw = data.tags.tags;
       } else if (labelMaps && Object.keys(labelMaps).length > 0) {
         tagsRaw = Object.keys(labelMaps);
       }
@@ -834,7 +862,6 @@
         }
       }
 
-      // ensure labels from map included even if tag list empty
       for (const [t, lbl] of Object.entries(labelMaps)) {
         const exists = entries.some((e) => e.tag === t);
         if (!exists) entries.push({ tag: t, label: lbl });
@@ -843,7 +870,7 @@
       const uniq = [];
       const seen = new Set();
       for (const e of entries) {
-        if (seen.has(e.tag)) continue;
+        if (!e.tag || seen.has(e.tag)) continue;
         seen.add(e.tag);
         uniq.push(e);
       }
@@ -851,7 +878,7 @@
     }
 
     function renderTags(resp) {
-      const entries = extractTagEntries(resp);
+      const entries = normalizeTagsResponse(resp);
       approvedTagEntries = entries;
       tagLabelMap = {};
       entries.forEach((e) => {
@@ -953,7 +980,8 @@
       for (const entry of entries) {
         const opt = document.createElement("option");
         opt.value = entry.tag;
-        opt.textContent = entry.tag;
+        const labelText = entry.label ? entry.label : "No label";
+        opt.textContent = `${entry.tag} — ${labelText}`;
         groupAddTagSelect.appendChild(opt);
       }
     }
@@ -1108,7 +1136,7 @@
       }
     }
 
-    function addPairRow(tagVal = "", labelVal = "") {
+    function addPairRow(tagVal = "", labelVal = "", readOnlyTag = false) {
       const tr = document.createElement("tr");
       const tdTag = document.createElement("td");
       const tdLabel = document.createElement("td");
@@ -1116,20 +1144,30 @@
       const tagInput = document.createElement("input");
       tagInput.type = "text";
       tagInput.value = tagVal;
+      tagInput.readOnly = readOnlyTag;
       const labelInput = document.createElement("input");
       labelInput.type = "text";
       labelInput.maxLength = 5;
       labelInput.value = labelVal;
+      const errorDiv = document.createElement("div");
+      errorDiv.className = "row-error";
       const removeBtn = document.createElement("button");
       removeBtn.className = "secondary";
       removeBtn.type = "button";
       removeBtn.textContent = "Remove";
-      removeBtn.addEventListener("click", () => tr.remove());
+      removeBtn.addEventListener("click", () => {
+        tr.remove();
+        validateGroupEditor();
+      });
+      tagInput.addEventListener("input", validateGroupEditor);
+      labelInput.addEventListener("input", validateGroupEditor);
       tdTag.appendChild(tagInput);
       tdLabel.appendChild(labelInput);
+      tdLabel.appendChild(errorDiv);
       tdRemove.appendChild(removeBtn);
       tr.append(tdTag, tdLabel, tdRemove);
       groupPairsBody.appendChild(tr);
+      validateGroupEditor();
     }
 
     function clearGroupEditor() {
@@ -1142,8 +1180,10 @@
       groupStrictTagsInput.checked = true;
       groupStrictLabelsInput.checked = true;
       groupPairsBody.innerHTML = "";
-      groupSaveBtn.textContent = "Create Group";
+      groupCreateBtn.style.display = "inline-flex";
+      groupUpdateBtn.style.display = "none";
       groupEditorStatus.textContent = "";
+      validateGroupEditor(false);
     }
 
     function setGroupEditor(g) {
@@ -1158,8 +1198,10 @@
       groupStrictLabelsInput.checked = settings.strict_label_set !== false;
       groupPairsBody.innerHTML = "";
       (g.required_pairs || []).forEach((p) => addPairRow(p.tag || "", p.label || ""));
-      groupSaveBtn.textContent = "Update Group";
+      groupCreateBtn.style.display = "none";
+      groupUpdateBtn.style.display = "inline-flex";
       groupEditorStatus.textContent = "";
+      validateGroupEditor(false);
     }
 
     function generateGroupId() {
@@ -1171,29 +1213,67 @@
       return `G-${String(max + 1).padStart(3, "0")}`;
     }
 
-    function collectPairs() {
-      const pairs = [];
-      const tags = new Set();
-      const labels = new Set();
+    function validateGroupEditor(showStatus = true) {
       let error = "";
-      groupPairsBody.querySelectorAll("tr").forEach((tr) => {
+      const name = groupNameInput.value.trim();
+      const rows = Array.from(groupPairsBody.querySelectorAll("tr"));
+      const pairs = [];
+      const tagCounts = {};
+      const labelCounts = {};
+
+      rows.forEach((tr) => {
         const inputs = tr.querySelectorAll("input");
         const tagVal = (inputs[0].value || "").trim().toUpperCase();
         const labelVal = (inputs[1].value || "").trim();
-        if (!tagVal && !labelVal) return;
-        if (!tagVal) error = "Tag is required for each pair.";
-        if (!/^\d{5}$/.test(labelVal)) error = "Label must be exactly 5 digits.";
-        if (tags.has(tagVal)) error = "Duplicate tag in group.";
-        if (labels.has(labelVal)) error = "Duplicate label in group.";
-        tags.add(tagVal);
-        labels.add(labelVal);
-        pairs.push({ tag: tagVal, label: labelVal });
+        if (tagVal) tagCounts[tagVal] = (tagCounts[tagVal] || 0) + 1;
+        if (labelVal) labelCounts[labelVal] = (labelCounts[labelVal] || 0) + 1;
       });
-      if (!pairs.length) error = "Group must have at least one pair.";
+
+      rows.forEach((tr) => {
+        const inputs = tr.querySelectorAll("input");
+        const tagInput = inputs[0];
+        const labelInput = inputs[1];
+        const err = tr.querySelector(".row-error");
+        const tagVal = (tagInput.value || "").trim().toUpperCase();
+        const labelVal = (labelInput.value || "").trim();
+        let rowError = "";
+        tagInput.classList.remove("input-error");
+        labelInput.classList.remove("input-error");
+        if (!tagVal) {
+          rowError = "Tag is required.";
+          tagInput.classList.add("input-error");
+        } else if (tagCounts[tagVal] > 1) {
+          rowError = "Duplicate tag.";
+          tagInput.classList.add("input-error");
+        }
+
+        if (!labelVal) {
+          rowError = rowError || "Label is required.";
+          labelInput.classList.add("input-error");
+        } else if (!/^\d{5}$/.test(labelVal)) {
+          rowError = rowError || "Label must be 5 digits.";
+          labelInput.classList.add("input-error");
+        } else if (labelCounts[labelVal] > 1) {
+          rowError = rowError || "Duplicate label.";
+          labelInput.classList.add("input-error");
+        }
+
+        if (err) err.textContent = rowError;
+        if (!rowError && tagVal && labelVal) {
+          pairs.push({ tag: tagVal, label: labelVal });
+        }
+      });
+
+      if (!name) error = "Group name is required.";
+      if (!pairs.length) error = error || "Group must have at least one pair.";
+
+      groupCreateBtn.disabled = !!error;
+      groupUpdateBtn.disabled = !!error;
+      if (showStatus) groupEditorStatus.textContent = error;
       return { pairs, error };
     }
 
-    async function saveGroup() {
+    async function saveGroup(isUpdate) {
       groupEditorStatus.textContent = "";
       const name = groupNameInput.value.trim();
       let groupId = groupIdInput.value.trim();
@@ -1205,9 +1285,8 @@
       const tagWindow = parseFloat(groupTagWindowInput.value || "5.0");
       const strictTags = !!groupStrictTagsInput.checked;
       const strictLabels = !!groupStrictLabelsInput.checked;
-      const { pairs, error } = collectPairs();
+      const { pairs, error } = validateGroupEditor(true);
       if (error) {
-        groupEditorStatus.textContent = error;
         return;
       }
       const payload = {
@@ -1222,7 +1301,7 @@
         },
       };
       try {
-        if (editingGroupId) {
+        if (isUpdate && editingGroupId) {
           await fetchJson(`/api/groups/${encodeURIComponent(editingGroupId)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -1236,6 +1315,7 @@
             body: JSON.stringify(payload),
           });
           groupEditorStatus.textContent = "Group created.";
+          clearGroupEditor();
         }
         await loadGroups();
       } catch (e) {
@@ -1244,12 +1324,27 @@
     }
 
     groupAddRowBtn.addEventListener("click", () => addPairRow());
-    groupNewBtn.addEventListener("click", clearGroupEditor);
-    groupSaveBtn.addEventListener("click", saveGroup);
+    groupClearBtn.addEventListener("click", clearGroupEditor);
+    groupCreateBtn.addEventListener("click", () => saveGroup(false));
+    groupUpdateBtn.addEventListener("click", () => saveGroup(true));
     groupAddTagBtn.addEventListener("click", () => {
       const tag = groupAddTagSelect.value;
       if (!tag) return;
-      addPairRow(tag, tagLabelMap[tag] || "");
+      const existing = Array.from(groupPairsBody.querySelectorAll("tr")).some((tr) => {
+        const input = tr.querySelector("input");
+        return input && input.value.trim().toUpperCase() === tag.trim().toUpperCase();
+      });
+      if (existing) {
+        groupEditorStatus.textContent = "Tag already added to this group.";
+        return;
+      }
+      addPairRow(tag, tagLabelMap[tag] || "", true);
+    });
+    groupRefreshBtn.addEventListener("click", loadGroups);
+
+    [groupNameInput, groupIdInput, groupTagWindowInput, groupStrictTagsInput, groupStrictLabelsInput].forEach((el) => {
+      el.addEventListener("input", () => validateGroupEditor(false));
+      el.addEventListener("change", () => validateGroupEditor(false));
     });
 
     async function submitCapture() {
@@ -1496,6 +1591,8 @@
           const match = activeList.find((t) => t.tag === retryTag);
           if (match && match.last_seen && data.server_time) {
             recentSingle = (data.server_time - match.last_seen) <= retryMaxAge;
+          } else if (r.last_tag_time && r.last_tag === retryTag && data.server_time) {
+            recentSingle = (data.server_time - r.last_tag_time) <= retryMaxAge;
           }
         }
         let groupValid = false;
@@ -1661,6 +1758,7 @@
     setListening(false);
     refreshTags();
     pollStatus();
+    clearGroupEditor();
     loadGroups();
     setInterval(pollStatus, 1000);
   </script>
