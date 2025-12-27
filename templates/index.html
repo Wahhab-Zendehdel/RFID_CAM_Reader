@@ -155,6 +155,21 @@
       flex-wrap: wrap;
     }
 
+    .inputs-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .inputs-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
     input[type="text"] {
       flex: 1 1 auto;
       min-width: 160px;
@@ -514,13 +529,15 @@
   data-beep-default="{{ '1' if beep_default else '0' }}"
   data-require-label-match="{{ '1' if require_label_match else '0' }}"
   data-present-window="{{ present_window_seconds|default(2.0) }}"
+  data-tag-slots="{{ default_tag_slots|default(5) }}"
+  data-label-slots="{{ default_label_slots|default(1) }}"
 >
   <div class="app">
     <header class="topbar">
       <div class="brand">RFID Label OCR</div>
 
       <nav class="tabs" aria-label="Tabs">
-        <button class="tab-btn active" data-tab="tags" type="button">Approved Tags</button>
+        <button class="tab-btn active" data-tab="tags" type="button">Vehicles</button>
         <button class="tab-btn" data-tab="capture" type="button">RFID Capture</button>
       </nav>
 
@@ -534,17 +551,21 @@
       <section class="tab-panel active" id="tab-tags">
         <div class="panel">
           <div class="row">
-            <input id="tag-input" type="text" placeholder="Enter EPC/UID (hex) ..." autocomplete="off" />
-            <input id="label-input" type="text" placeholder="Label number" autocomplete="off" inputmode="numeric" />
-            <button class="primary" id="add-tag-btn" type="button">Add Tag</button>
+            <div class="inputs-stack">
+              <div class="inputs-row" id="tag-inputs"></div>
+              <div class="inputs-row" id="label-inputs"></div>
+            </div>
+            <input type="hidden" id="vehicle-id" />
+            <button class="primary" id="save-vehicle-btn" type="button">Save Vehicle</button>
+            <button class="secondary" id="clear-vehicle-btn" type="button">Clear</button>
             <button class="secondary" id="listen-btn" type="button">Listening: OFF</button>
           </div>
           <div class="status" id="tags-status"></div>
-          <div class="hint" id="tags-meta">Approved tags: 0</div>
+          <div class="hint" id="tags-meta">Vehicle tags: 0</div>
         </div>
 
         <div class="panel" style="flex: 1 1 auto; min-height: 0;">
-          <div class="hint" style="margin-bottom: 10px;">Approved tag list (stored in <code>approved_tags.json</code>)</div>
+          <div class="hint" style="margin-bottom: 10px;">Vehicle tags (stored in SQLite)</div>
           <div class="tag-grid" id="tags"></div>
         </div>
       </section>
@@ -554,22 +575,22 @@
           <div class="capture-grid">
           <div class="capture-col capture-left">
             <div class="panel panel-col panel-info">
-              <div class="hint panel-heading" id="approved-count">Approved tags: 0</div>
+              <div class="hint panel-heading" id="approved-count">Vehicles: 0</div>
               <div class="kv panel-section">
                 <div class="k">Last RFID tag</div><div class="v" id="last-tag">-</div>
-                <div class="k">Approved</div><div class="v" id="last-approved">-</div>
+                <div class="k">Known</div><div class="v" id="last-approved">-</div>
                 <div class="k">Queue</div><div class="v" id="queue-size">0</div>
                 <div class="k">Capture</div><div class="v" id="cap-state">idle</div>
                 <div class="k">Trigger tag</div><div class="v" id="cap-tag">-</div>
                 <div class="k">Effective tag</div><div class="v" id="cap-effective">-</div>
-                <div class="k">Expected label</div><div class="v" id="cap-expected">-</div>
+                <div class="k">Expected labels</div><div class="v" id="cap-expected">-</div>
                 <div class="k">Detected label</div><div class="v" id="cap-detected">-</div>
                 <div class="k">Attempt</div><div class="v" id="cap-attempt">0</div>
                 <div class="k">Message</div><div class="v" id="cap-msg">-</div>
               </div>
 
               <div class="number" id="cap-number">-----</div>
-              <div class="status" id="cap-sub">Waiting for approved RFID tag...</div>
+              <div class="status" id="cap-sub">Waiting for registered RFID tag...</div>
               <div class="row panel-actions">
                 <button class="primary" id="submit-btn" type="button" disabled>Submit capture</button>
                 <div class="hint" id="submit-status">Capture must succeed before submit.</div>
@@ -645,9 +666,11 @@
     const connDot = document.getElementById("conn-dot");
     const connText = document.getElementById("conn-text");
 
-    const tagInput = document.getElementById("tag-input");
-    const labelInput = document.getElementById("label-input");
-    const addTagBtn = document.getElementById("add-tag-btn");
+    const tagInputsContainer = document.getElementById("tag-inputs");
+    const labelInputsContainer = document.getElementById("label-inputs");
+    const vehicleIdInput = document.getElementById("vehicle-id");
+    const saveVehicleBtn = document.getElementById("save-vehicle-btn");
+    const clearVehicleBtn = document.getElementById("clear-vehicle-btn");
     const listenBtn = document.getElementById("listen-btn");
     const tagsStatus = document.getElementById("tags-status");
     const tagsMeta = document.getElementById("tags-meta");
@@ -689,7 +712,11 @@
     const presentWindowSeconds = Number(document.body.dataset.presentWindow || 2);
     const safePresentWindowSeconds = Number.isFinite(presentWindowSeconds) && presentWindowSeconds > 0 ? presentWindowSeconds : 2;
     const beepDefault = document.body.dataset.beepDefault === "1";
-    const tagsCache = new Map();
+    const tagSlots = Math.max(1, Number(document.body.dataset.tagSlots || 5));
+    const labelSlots = Math.max(1, Number(document.body.dataset.labelSlots || 1));
+    const vehiclesCache = new Map();
+    const tagInputs = [];
+    const labelInputs = [];
 
     let activeTab = "tags";
     let pollInFlight = false;
@@ -704,13 +731,42 @@
     function applyTargetDigits(value) {
       const digits = Number.isFinite(value) && value > 0 ? value : null;
       targetDigits = digits;
-      if (labelInput) {
-        labelInput.placeholder = digits ? `Label number (${digits} digits)` : "Label number";
-        labelInput.maxLength = digits ? digits : 24;
-      }
+      labelInputs.forEach((input, idx) => {
+        input.placeholder = digits ? `Label ${idx + 1} (${digits} digits)` : `Label ${idx + 1}`;
+        input.maxLength = digits ? digits : 64;
+        input.inputMode = digits ? "numeric" : "text";
+      });
     }
 
-    applyTargetDigits(targetDigits);
+    function buildVehicleInputs() {
+      tagInputsContainer.innerHTML = "";
+      labelInputsContainer.innerHTML = "";
+      tagInputs.length = 0;
+      labelInputs.length = 0;
+
+      for (let i = 0; i < tagSlots; i += 1) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = `Tag ${i + 1}`;
+        input.autocomplete = "off";
+        input.dataset.slot = String(i + 1);
+        tagInputs.push(input);
+        tagInputsContainer.appendChild(input);
+      }
+
+      for (let i = 0; i < labelSlots; i += 1) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = `Label ${i + 1}`;
+        input.autocomplete = "off";
+        input.dataset.slot = String(i + 1);
+        labelInputs.push(input);
+        labelInputsContainer.appendChild(input);
+      }
+      applyTargetDigits(targetDigits);
+    }
+
+    buildVehicleInputs();
     if (beepToggle) {
       beepToggle.checked = beepEnabled;
     }
@@ -810,66 +866,63 @@
       osc.stop(ctx.currentTime + (durationMs || 0.08));
     }
 
-    function validateLabelInput(label) {
+    function validateLabelValue(label) {
       const trimmed = (label || "").trim();
       if (!trimmed) return { ok: true, value: "" };
-      if (!/^\d+$/.test(trimmed)) {
-        return { ok: false, message: "Label must contain digits only." };
-      }
-      if (targetDigits && trimmed.length !== targetDigits) {
+      const normalized = trimmed.toUpperCase();
+      if (targetDigits && /^\d+$/.test(normalized) && normalized.length !== targetDigits) {
         return { ok: false, message: `Label must be ${targetDigits} digits.` };
       }
-      return { ok: true, value: trimmed };
+      return { ok: true, value: normalized };
     }
 
-    function renderTags(items) {
+    function clearVehicleForm() {
+      if (vehicleIdInput) vehicleIdInput.value = "";
+      tagInputs.forEach((input) => (input.value = ""));
+      labelInputs.forEach((input) => (input.value = ""));
+    }
+
+    function fillVehicleForm(vehicle) {
+      if (!vehicle) return;
+      if (vehicleIdInput) vehicleIdInput.value = vehicle.id || "";
+      tagInputs.forEach((input, idx) => {
+        input.value = (vehicle.tags || [])[idx] || "";
+      });
+      labelInputs.forEach((input, idx) => {
+        input.value = (vehicle.labels || [])[idx] || "";
+      });
+    }
+
+    function renderVehicles(items) {
       const MAX_RENDER = 50;
       const safeItems = Array.isArray(items) ? items : [];
       const shown = safeItems.slice(0, MAX_RENDER);
       tagsContainer.innerHTML = "";
-      tagsCache.clear();
+      vehiclesCache.clear();
 
-      for (const item of safeItems) {
-        const tag = String(item.tag || "");
-        if (!tag) continue;
-        tagsCache.set(tag, String(item.label || ""));
+      let totalTags = 0;
+      for (const vehicle of safeItems) {
+        vehiclesCache.set(vehicle.id, vehicle);
+        totalTags += (vehicle.tags || []).length;
       }
 
-      for (const item of shown) {
-        const tag = String(item.tag || "");
-        if (!tag) continue;
-        const label = String(item.label || "");
+      for (const vehicle of shown) {
+        const tags = (vehicle.tags || []).join(", ");
+        const labels = (vehicle.labels || []).join(", ");
         const chip = document.createElement("div");
         chip.className = "chip";
 
         const text = document.createElement("span");
-        const labelText = label ? label : "(no label)";
-        text.textContent = `${tag} - ${labelText}`;
+        const labelText = labels ? labels : "(no labels)";
+        text.textContent = `${tags || "(no tags)"} - ${labelText}`;
 
         const edit = document.createElement("button");
         edit.type = "button";
         edit.textContent = "edit";
-        edit.title = "Edit label";
-        edit.addEventListener("click", async () => {
-          const promptLabel = targetDigits ? `Enter ${targetDigits}-digit label for ${tag}` : `Enter label for ${tag}`;
-          const nextLabel = window.prompt(promptLabel, label);
-          if (nextLabel === null) return;
-          const validation = validateLabelInput(nextLabel);
-          if (!validation.ok) {
-            tagsStatus.textContent = validation.message;
-            return;
-          }
-          tagsStatus.textContent = "";
-          try {
-            await fetchJson("/api/tags", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ tag, label: validation.value }),
-            });
-            await refreshTags();
-          } catch (e) {
-            tagsStatus.textContent = String(e.message || e);
-          }
+        edit.title = "Edit vehicle";
+        edit.addEventListener("click", () => {
+          fillVehicleForm(vehicle);
+          tagsStatus.textContent = "Editing vehicle. Update fields and click Save Vehicle.";
         });
 
         const del = document.createElement("button");
@@ -878,8 +931,8 @@
         del.title = "Remove";
         del.addEventListener("click", async () => {
           try {
-            await fetchJson("/api/tags/" + encodeURIComponent(tag), { method: "DELETE" });
-            await refreshTags();
+            await fetchJson("/api/vehicles/" + encodeURIComponent(vehicle.id), { method: "DELETE" });
+            await refreshVehicles();
           } catch (e) {
             tagsStatus.textContent = String(e.message || e);
           }
@@ -892,67 +945,71 @@
       }
 
       const extra = safeItems.length > MAX_RENDER ? ` (showing ${MAX_RENDER} of ${safeItems.length})` : "";
-      tagsMeta.textContent = `Approved tags: ${safeItems.length}${extra}`;
+      tagsMeta.textContent = `Vehicle tags: ${totalTags} (vehicles: ${safeItems.length})${extra}`;
     }
 
-    async function refreshTags() {
+    async function refreshVehicles() {
       try {
-        const data = await fetchJson("/api/tags");
-        if (Number.isFinite(Number(data.target_digits))) {
-          applyTargetDigits(Number(data.target_digits));
-        }
-        if (Array.isArray(data.items)) {
-          renderTags(data.items);
-        } else if (Array.isArray(data.tags)) {
-          renderTags(data.tags.map((tag) => ({ tag, label: "" })));
+        const data = await fetchJson("/api/vehicles");
+        if (Array.isArray(data)) {
+          renderVehicles(data);
+        } else if (Array.isArray(data.items)) {
+          renderVehicles(data.items);
         } else {
-          renderTags([]);
+          renderVehicles([]);
         }
       } catch (e) {
         tagsStatus.textContent = String(e.message || e);
       }
     }
 
-    async function addTag() {
-      const tag = tagInput.value.trim();
-      if (!tag) return;
-      const labelRaw = labelInput ? labelInput.value.trim() : "";
-      const validation = validateLabelInput(labelRaw);
-      if (!validation.ok) {
-        tagsStatus.textContent = validation.message;
+    async function saveVehicle() {
+      const tags = tagInputs.map((input) => input.value.trim()).filter(Boolean);
+      const labels = [];
+      for (const input of labelInputs) {
+        const validation = validateLabelValue(input.value);
+        if (!validation.ok) {
+          tagsStatus.textContent = validation.message;
+          return;
+        }
+        if (validation.value) labels.push(validation.value);
+      }
+      if (!tags.length) {
+        tagsStatus.textContent = "At least one tag is required.";
         return;
       }
-      addTagBtn.disabled = true;
+
+      saveVehicleBtn.disabled = true;
       tagsStatus.textContent = "";
       try {
-        const payload = { tag };
-        if (validation.value) {
-          payload.label = validation.value;
-        }
-        await fetchJson("/api/tags", {
+        const payload = { tags, labels };
+        const vehicleId = vehicleIdInput ? vehicleIdInput.value.trim() : "";
+        if (vehicleId) payload.id = Number(vehicleId);
+        await fetchJson("/api/vehicles", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        tagInput.value = "";
-        if (labelInput) labelInput.value = "";
-        await refreshTags();
+        clearVehicleForm();
+        await refreshVehicles();
       } catch (e) {
         tagsStatus.textContent = String(e.message || e);
       } finally {
-        addTagBtn.disabled = false;
+        saveVehicleBtn.disabled = false;
       }
     }
 
-    addTagBtn.addEventListener("click", addTag);
-    tagInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") addTag();
+    saveVehicleBtn.addEventListener("click", saveVehicle);
+    clearVehicleBtn.addEventListener("click", () => {
+      clearVehicleForm();
+      tagsStatus.textContent = "";
     });
-    if (labelInput) {
-      labelInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") addTag();
-      });
-    }
+    tagInputsContainer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveVehicle();
+    });
+    labelInputsContainer.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveVehicle();
+    });
 
     async function submitCapture() {
       submitBtn.disabled = true;
@@ -994,7 +1051,9 @@
         tdTime.textContent = (ev.time_iso || "").replace("T", " ").replace("Z", "");
 
         if (ev.type === "rfid") {
-          tdInfo.textContent = `${ev.tag || ""}${ev.approved ? " (approved)" : " (not approved)"}`;
+          tdInfo.textContent = `${ev.tag || ""}`;
+        } else if (ev.type === "vehicle_resolved") {
+          tdInfo.textContent = `${ev.tag || ""} -> vehicle ${ev.vehicle_id || ""}`.trim();
         } else if (ev.type === "number") {
           tdInfo.textContent = `${ev.tag || ""} -> ${ev.number || ""} (attempt ${ev.attempt || 0})`;
         } else if (ev.type === "mismatch") {
@@ -1084,7 +1143,8 @@
         const camPrimary = cams.primary || {};
         const camSecondary = cams.secondary || data.secondary_camera || {};
 
-        approvedCount.textContent = `Approved tags: ${data.approved_tags_count || 0}`;
+        const vehiclesCount = Number.isFinite(Number(data.vehicles_count)) ? data.vehicles_count : data.approved_tags_count || 0;
+        approvedCount.textContent = `Vehicles: ${vehiclesCount}`;
 
         if (!r.enabled) {
           setConn("off", false, "");
@@ -1104,14 +1164,15 @@
         }
 
         lastTag.textContent = r.last_tag || "-";
-        lastApproved.textContent = r.last_tag ? (r.last_tag_approved ? "YES" : "NO") : "-";
+        const lastKnown = r.last_tag_known ?? r.last_tag_approved;
+        lastApproved.textContent = r.last_tag ? (lastKnown ? "YES" : "NO") : "-";
         queueSize.textContent = String(r.queue_size ?? 0);
         latestTagTime = Number(r.last_tag_time || 0);
         latestNumberTime = Number(c.number_time || 0);
 
         capState.textContent = c.state || "idle";
         capTag.textContent = c.tag || "-";
-        const effectiveTag = c.effective_tag || c.resolved_tag || c.tag || "";
+        const effectiveTag = c.matched_tag || c.effective_tag || c.resolved_tag || c.tag || "";
         if (effectiveTag) {
           const baseTag = c.tag && c.tag !== effectiveTag ? ` (was ${c.tag})` : "";
           capEffective.textContent = `${effectiveTag}${baseTag}`;
@@ -1119,7 +1180,10 @@
           capEffective.textContent = "-";
         }
         const hasTag = !!c.tag;
-        capExpected.textContent = hasTag ? (c.label_expected ? c.label_expected : "(no label)") : "-";
+        const expectedLabels = Array.isArray(c.expected_labels)
+          ? c.expected_labels
+          : (c.label_expected ? [c.label_expected] : []);
+        capExpected.textContent = hasTag ? (expectedLabels.length ? expectedLabels.join(", ") : "(no labels)") : "-";
         capDetected.textContent = hasTag ? (c.label_detected ? c.label_detected : "-") : "-";
         capAttempt.textContent = String(c.attempt ?? 0);
         capMsg.textContent = c.message || "-";
@@ -1144,7 +1208,7 @@
         else if (c.state === "submitted") capSub.textContent = "Submitted. Ready for next tag." + (secMsg ? ` Secondary: ${secMsg}` : "");
         else if (c.state === "success") capSub.textContent = "Done.";
         else if (c.state === "failed") capSub.textContent = "Failed.";
-        else capSub.textContent = "Waiting for approved RFID tag...";
+        else capSub.textContent = "Waiting for registered RFID tag...";
 
         const awaitingSubmit = !!c.awaiting_submit;
         const labelMismatch = c.label_match === false;
@@ -1247,14 +1311,15 @@
         if (activeTab === "tags" && listenEnabled && r.enabled) {
           const tag = (r.last_tag || "").trim();
           const tagTime = Number(r.last_tag_time || 0);
-          const tagApproved = !!r.last_tag_approved;
+          const tagApproved = !!(r.last_tag_known ?? r.last_tag_approved);
 
           if (tag && tagTime && tagTime > lastScannedTime) {
             lastScannedTime = tagTime;
-            tagInput.value = tag;
+            const targetInput = tagInputs.find((input) => !input.value.trim()) || tagInputs[0];
+            if (targetInput) targetInput.value = tag;
             tagsStatus.textContent = tagApproved
-              ? `Scanned: ${tag} (already approved)`
-              : `Scanned: ${tag} (enter label then click Add)`;
+              ? `Scanned: ${tag} (already registered)`
+              : `Scanned: ${tag} (enter labels then click Save Vehicle)`;
           }
         }
       } catch (e) {
@@ -1276,7 +1341,7 @@
     }
 
     setListening(false);
-    refreshTags();
+    refreshVehicles();
     pollStatus();
     setInterval(pollStatus, safePollIntervalMs);
   </script>

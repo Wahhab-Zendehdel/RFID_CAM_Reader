@@ -80,5 +80,16 @@
     "beep_on_detection_default": true,
     "status_poll_ms": 1000,
     "poll_interval_ms": 1000
+  },
+  "db": {
+    "path": "data/app.db"
+  },
+  "storage": {
+    "images_dir": "data/images",
+    "logs_dir": "logs"
+  },
+  "vehicles": {
+    "default_tag_slots": 5,
+    "default_label_slots": 1
   }
 }
