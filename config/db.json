@@ -1,0 +1,9 @@
+{
+  "db": {
+    "path": "data/app.db",
+    "mysql": {
+      "enabled": true,
+      "connection_string": "mysql://remoteuser:StrongPassword@192.168.1.3:3306/myapp"
+    }
+  }
+}
