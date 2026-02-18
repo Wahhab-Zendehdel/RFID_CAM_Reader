@@ -51,20 +51,25 @@ def _attempt_mysql_insert(params: Dict[str, Any], row: sqlite3.Row) -> Optional[
             cur.execute(
                 """
                 INSERT INTO records (
-                    datetime, station, tags, number,
+                    datetime, station, station_id, station_type, tags, number,
                     primary_image_url, secondary_image_url, label_image_url,
-                    message, errors
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    rfid_device_id, primary_cam_id, secondary_cam_id,
+                    errors
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     mysql_dt if mysql_dt is not None else row["datetime"],
                     row["station"],
+                    row["station_id"],
+                    row["station_type"],
                     row["tags"],
                     row["number"],
                     row["primary_image_url"],
                     row["secondary_image_url"],
                     row["label_image_url"],
-                    row["message"],
+                    row["rfid_device_id"],
+                    row["primary_cam_id"],
+                    row["secondary_cam_id"],
                     row["errors"],
                 ),
             )

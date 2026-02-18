@@ -18,12 +18,16 @@ def _ensure_sqlite_table(db_path: str) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 datetime TEXT,
                 station TEXT,
+                station_id INTEGER,
+                station_type TEXT,
                 tags TEXT,
                 number TEXT,
                 primary_image_url TEXT,
                 secondary_image_url TEXT,
                 label_image_url TEXT,
-                message TEXT,
+                rfid_device_id INTEGER,
+                primary_cam_id INTEGER,
+                secondary_cam_id INTEGER,
                 errors TEXT
             )
             """
@@ -34,6 +38,11 @@ def _ensure_sqlite_table(db_path: str) -> None:
         cur.execute("PRAGMA table_info(records)")
         existing = {row[1] for row in cur.fetchall()}
         extras = [
+            ("station_id", "INTEGER", ""),
+            ("station_type", "TEXT", ""),
+            ("rfid_device_id", "INTEGER", ""),
+            ("primary_cam_id", "INTEGER", ""),
+            ("secondary_cam_id", "INTEGER", ""),
             ("created_at", "TEXT", ""),
             ("synced", "INTEGER", ""),
             ("mysql_id", "INTEGER", ""),
@@ -145,20 +154,25 @@ def store_result(payload: Dict[str, Any], db_cfg: Dict[str, Any]) -> None:
             cur.execute(
                 """
                 INSERT INTO records (
-                    datetime, station, tags, number,
+                    datetime, station, station_id, station_type, tags, number,
                     primary_image_url, secondary_image_url, label_image_url,
-                    message, errors, created_at, synced, mysql_id, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    rfid_device_id, primary_cam_id, secondary_cam_id,
+                    errors, created_at, synced, mysql_id, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.get("datetime"),
                     payload.get("station"),
+                    payload.get("station_id"),
+                    payload.get("station_type"),
                     tags_json,
                     payload.get("number"),
                     payload.get("primary_image_url"),
                     payload.get("secondary_image_url"),
                     payload.get("label_image_url"),
-                    payload.get("message"),
+                    payload.get("rfid_device_id"),
+                    payload.get("primary_cam_id"),
+                    payload.get("secondary_cam_id"),
                     errors_json,
                     payload.get("datetime") or datetime.utcnow().isoformat(),
                     0,
@@ -214,20 +228,25 @@ def store_result(payload: Dict[str, Any], db_cfg: Dict[str, Any]) -> None:
                 cur.execute(
                     """
                     INSERT INTO records (
-                        datetime, station, tags, number,
+                        datetime, station, station_id, station_type, tags, number,
                         primary_image_url, secondary_image_url, label_image_url,
-                        message, errors
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        rfid_device_id, primary_cam_id, secondary_cam_id,
+                        errors
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         mysql_dt if mysql_dt is not None else payload.get("datetime"),
                         payload.get("station"),
+                        payload.get("station_id"),
+                        payload.get("station_type"),
                         tags_json,
                         payload.get("number"),
                         payload.get("primary_image_url"),
                         payload.get("secondary_image_url"),
                         payload.get("label_image_url"),
-                        payload.get("message"),
+                        payload.get("rfid_device_id"),
+                        payload.get("primary_cam_id"),
+                        payload.get("secondary_cam_id"),
                         errors_json,
                     ),
                 )

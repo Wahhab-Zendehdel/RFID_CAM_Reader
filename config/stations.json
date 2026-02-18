@@ -1,16 +1,14 @@
 [
   {
+    "id": 1,
     "name": "bascol_1",
     "type": "bascol",
-    "primary_cam": "192.168.1.206",
+    "primary_cam_id": 1,
+    "primary_cam": "192.168.1.95",
+    "secondary_cam_id": 2,
     "secondary_cam": "192.168.1.205",
+    "rfid_device_id": 3,
     "rfid_host": "192.168.1.10",
-    "rfid_port": 6000
-  },
-  {
-    "name": "sangshekan_1",
-    "type": "sangshekan",
-    "rfid_host": "192.168.1.102",
     "rfid_port": 6000
   }
 ]

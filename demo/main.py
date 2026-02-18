@@ -11,7 +11,7 @@ from lib.sangshekan_station import SangShekanStation
 from lib.common_config import load_config
 from lib.common_db import init_db, store_result
 import multiprocessing
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import sqlite3
 from pathlib import Path
 import logging
@@ -47,6 +47,29 @@ def _save_image_to_file(image, image_type: str, tag: str) -> str:
     except Exception as e:
         print(f"  ✗ Failed to save {image_type} image: {e}")
         return ""
+
+
+def _coerce_int(value) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _send_websocket_result(payload: dict) -> None:
@@ -102,12 +125,16 @@ def _init_db(db_path: str = "data/results.db") -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 datetime TEXT,
                 station TEXT,
+                station_id INTEGER,
+                station_type TEXT,
                 tags TEXT,
                 number TEXT,
                 primary_image_url TEXT,
                 secondary_image_url TEXT,
                 label_image_url TEXT,
-                message TEXT,
+                rfid_device_id INTEGER,
+                primary_cam_id INTEGER,
+                secondary_cam_id INTEGER,
                 errors TEXT
             )
             """
@@ -129,20 +156,25 @@ def _store_result(payload: Dict[str, Any], db_path: str = "data/results.db") -> 
         cur.execute(
             """
             INSERT INTO results (
-                datetime, station, tags, number,
+                datetime, station, station_id, station_type, tags, number,
                 primary_image_url, secondary_image_url, label_image_url,
-                message, errors
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rfid_device_id, primary_cam_id, secondary_cam_id,
+                errors
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.get("datetime"),
                 payload.get("station"),
+                payload.get("station_id"),
+                payload.get("station_type"),
                 tags_json,
                 payload.get("number"),
                 payload.get("primary_image_url"),
                 payload.get("secondary_image_url"),
                 payload.get("label_image_url"),
-                payload.get("message"),
+                payload.get("rfid_device_id"),
+                payload.get("primary_cam_id"),
+                payload.get("secondary_cam_id"),
                 errors_json,
             ),
         )
@@ -210,7 +242,11 @@ def run_bascol_demo():
                     print(f"  📸 Label image: {label_url}")
                 
                 # Build normalized payload and store to DB
-                payload = _save_and_build_bascol_payload(result, "bascol")
+                payload = _save_and_build_bascol_payload(
+                    result,
+                    "bascol",
+                    station_type="bascol",
+                )
                 # ensure image URLs from current capture
                 payload["primary_image_url"] = primary_url or None
                 payload["secondary_image_url"] = secondary_url or None
@@ -257,7 +293,15 @@ def run_sangshekan_demo():
     
 
 
-def _save_and_build_bascol_payload(result, station_name: str) -> Dict[str, Any]:
+def _save_and_build_bascol_payload(
+    result,
+    station_name: str,
+    station_id: Optional[int] = None,
+    station_type: Optional[str] = None,
+    rfid_device_id: Optional[int] = None,
+    primary_cam_id: Optional[int] = None,
+    secondary_cam_id: Optional[int] = None,
+) -> Dict[str, Any]:
     primary_url = _save_image_to_file(result.primary_image, "primary", result.tag or station_name)
     secondary_url = _save_image_to_file(result.secondary_image, "secondary", result.tag or station_name)
     label_url = _save_image_to_file(result.label_image, "label", result.tag or station_name)
@@ -265,11 +309,16 @@ def _save_and_build_bascol_payload(result, station_name: str) -> Dict[str, Any]:
     payload = {
         "datetime": datetime.utcnow().isoformat(),
         "station": station_name,
+        "station_id": station_id,
+        "station_type": station_type,
         "tags": result.tags or ([result.tag] if result.tag else []),
         "number": result.number,
         "primary_image_url": primary_url or None,
         "secondary_image_url": secondary_url or None,
         "label_image_url": label_url or None,
+        "rfid_device_id": rfid_device_id,
+        "primary_cam_id": primary_cam_id,
+        "secondary_cam_id": secondary_cam_id,
         "message": result.message,
         "errors": result.errors or None,
     }
@@ -306,16 +355,29 @@ def _setup_logger(station_name: str, logs_dir: str = "logs") -> logging.Logger:
     return logger
 
 
-def _build_sangshekan_payload(event, station_name: str) -> Dict[str, Any]:
+def _build_sangshekan_payload(
+    event,
+    station_name: str,
+    station_id: Optional[int] = None,
+    station_type: Optional[str] = None,
+    rfid_device_id: Optional[int] = None,
+    primary_cam_id: Optional[int] = None,
+    secondary_cam_id: Optional[int] = None,
+) -> Dict[str, Any]:
     # Only include the clean fields; other fields should remain null for sangshekan
     return {
         "datetime": datetime.utcnow().isoformat(),
         "station": station_name,
+        "station_id": station_id,
+        "station_type": station_type,
         "tags": [event.tag] if getattr(event, "tag", None) else [],
         "number": None,
         "primary_image_url": None,
         "secondary_image_url": None,
         "label_image_url": None,
+        "rfid_device_id": rfid_device_id,
+        "primary_cam_id": primary_cam_id,
+        "secondary_cam_id": secondary_cam_id,
         "message": getattr(event, "message", getattr(event, "error", "")),
         "errors": getattr(event, "error", None),
     }
@@ -323,6 +385,11 @@ def _build_sangshekan_payload(event, station_name: str) -> Dict[str, Any]:
 
 def _bascol_worker(conf: Dict[str, Any]) -> None:
     name = conf.get("name") or "bascol"
+    station_id = _coerce_int(conf.get("id"))
+    station_type = conf.get("type") or "bascol"
+    rfid_device_id = _coerce_int(conf.get("rfid_device_id"))
+    primary_cam_id = _coerce_int(conf.get("primary_cam_id"))
+    secondary_cam_id = _coerce_int(conf.get("secondary_cam_id"))
     logger = _setup_logger(name)
     logger.info("starting bascol worker")
     station = BascolStation(
@@ -345,7 +412,15 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
             try:
                 result = station.process_next(timeout_sec=None)
                 logger.info("got result: success=%s tags=%s", result.success, result.tags)
-                payload = _save_and_build_bascol_payload(result, name)
+                payload = _save_and_build_bascol_payload(
+                    result,
+                    name,
+                    station_id=station_id,
+                    station_type=station_type,
+                    rfid_device_id=rfid_device_id,
+                    primary_cam_id=primary_cam_id,
+                    secondary_cam_id=secondary_cam_id,
+                )
                 # persist
                 try:
                     store_result(payload, db_cfg)
@@ -365,6 +440,9 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
 
 def _sangshekan_worker(conf: Dict[str, Any]) -> None:
     name = conf.get("name") or "sangshekan"
+    station_id = _coerce_int(conf.get("id"))
+    station_type = conf.get("type") or "sangshekan"
+    rfid_device_id = _coerce_int(conf.get("rfid_device_id"))
     logger = _setup_logger(name)
     logger.info("starting sangshekan worker")
     station = SangShekanStation(
@@ -385,7 +463,13 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
             try:
                 event = station.read_next_tag(timeout_sec=None)
                 logger.info("got tag event: tag=%s success=%s", event.tag, event.success)
-                payload = _build_sangshekan_payload(event, name)
+                payload = _build_sangshekan_payload(
+                    event,
+                    name,
+                    station_id=station_id,
+                    station_type=station_type,
+                    rfid_device_id=rfid_device_id,
+                )
                 try:
                     store_result(payload, db_cfg)
                 except Exception:

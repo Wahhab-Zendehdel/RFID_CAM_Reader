@@ -3,3 +3,4 @@ debug_paper/
 images/
 logs/
 trocr-large-printed/
+__pycache__/
