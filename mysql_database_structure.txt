@@ -1,0 +1,19 @@
+CREATE DATABASE myapp;
+USE myapp;
+
+CREATE TABLE records (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  datetime DATETIME NULL,
+  station VARCHAR(255) NULL,
+  station_id INT NULL,
+  station_type VARCHAR(255) NULL,
+  tags JSON NULL,
+  number VARCHAR(255) NULL,
+  primary_image_url TEXT NULL,
+  secondary_image_url TEXT NULL,
+  label_image_url TEXT NULL,
+  rfid_device_id INT NULL,
+  primary_cam_id INT NULL,
+  secondary_cam_id INT NULL,
+  errors JSON NULL
+);

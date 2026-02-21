@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 import os
@@ -45,7 +45,7 @@ def _save_image_to_file(image, image_type: str, tag: str) -> str:
         url = f"{image_server_url}/images/{filename}"
         return url
     except Exception as e:
-        print(f"  ✗ Failed to save {image_type} image: {e}")
+        print(f"  âœ— Failed to save {image_type} image: {e}")
         return ""
 
 
@@ -72,43 +72,6 @@ def _coerce_int(value) -> Optional[int]:
         return None
 
 
-def _send_websocket_result(payload: dict) -> None:
-    url = os.environ.get("WEBSOCKET_URL", "ws://127.0.0.1:2020")
-    if not url:
-        print("WEBSOCKET_URL not set; skipping websocket send")
-        return
-    try:
-        try:
-            # websocket-client
-            from websocket import create_connection
-            print(f"  Connecting to {url}...")
-            ws = create_connection(url, timeout=5)
-            print(f"  Sending {len(str(payload))} bytes...")
-            ws.send(json.dumps(payload))
-            ws.close()
-            print(f"✓ Sent result to {url}")
-            return
-        except Exception as e:
-            print(f"  websocket-client failed: {e}")
-            pass
-        try:
-            # fallback: websockets (async) - attempt a sync import will fail if not installed
-            import asyncio
-            import websockets
-
-            async def _send():
-                async with websockets.connect(url) as w:
-                    await w.send(json.dumps(payload))
-
-            print(f"  Using websockets library to send to {url}...")
-            asyncio.get_event_loop().run_until_complete(_send())
-            print(f"✓ Sent result to {url} (websockets)")
-            return
-        except Exception as e:
-            print(f"  websockets failed: {e}")
-            pass
-    except Exception as exc:
-        print(f"✗ Failed to send websocket payload: {exc}")
 
 
 def _init_db(db_path: str = "data/results.db") -> None:
@@ -180,7 +143,7 @@ def _store_result(payload: Dict[str, Any], db_path: str = "data/results.db") -> 
         )
         conn.commit()
     except Exception as e:
-        print(f"✗ Failed to store result in DB: {e}")
+        print(f"âœ— Failed to store result in DB: {e}")
     finally:
         try:
             conn.close()
@@ -190,7 +153,7 @@ def _store_result(payload: Dict[str, Any], db_path: str = "data/results.db") -> 
 def run_bascol_demo():
     """
     Continuous demo: listen for RFID tags, process each with camera capture,
-    and send results via websocket regardless of success/failure.
+    and store results in the local database regardless of success/failure.
     Runs indefinitely until stopped.
     """
     # Load DB config and initialize (will verify MySQL connectivity or create sqlite table)
@@ -199,7 +162,7 @@ def run_bascol_demo():
     try:
         init_db(db_cfg)
     except Exception as e:
-        print(f"✗ DB initialization warning: {e}")
+        print(f"âœ— DB initialization warning: {e}")
 
     station = BascolStation(
         primary_cam="192.168.1.3",
@@ -208,7 +171,7 @@ def run_bascol_demo():
         rfid_port=6000,
     )
     station.start()
-    print("📍 Bascol Station started. Listening for RFID tags...")
+    print("ًں“چ Bascol Station started. Listening for RFID tags...")
     print("   Running indefinitely. Press Ctrl+C to stop.\n")
     
     try:
@@ -216,11 +179,11 @@ def run_bascol_demo():
             try:
                 # Process captures continuously
                 # timeout_sec=None means wait indefinitely for tags
-                print("⏳ Waiting for RFID tag...")
+                print("âڈ³ Waiting for RFID tag...")
                 result = station.process_next(timeout_sec=None)
                 
                 print("\n" + "=" * 70)
-                print(f"📦 Capture Result (attempt {result.attempts}):")
+                print(f"ًں“¦ Capture Result (attempt {result.attempts}):")
                 print(f"   Tags: {result.tags}")
                 print(f"   Success: {result.success}")
                 print(f"   Number: {result.number}")
@@ -235,11 +198,11 @@ def run_bascol_demo():
                 label_url = _save_image_to_file(result.label_image, "label", result.tag)
                 
                 if primary_url:
-                    print(f"  📸 Primary image: {primary_url}")
+                    print(f"  ًں“¸ Primary image: {primary_url}")
                 if secondary_url:
-                    print(f"  📸 Secondary image: {secondary_url}")
+                    print(f"  ًں“¸ Secondary image: {secondary_url}")
                 if label_url:
-                    print(f"  📸 Label image: {label_url}")
+                    print(f"  ًں“¸ Label image: {label_url}")
                 
                 # Build normalized payload and store to DB
                 payload = _save_and_build_bascol_payload(
@@ -252,30 +215,28 @@ def run_bascol_demo():
                 payload["secondary_image_url"] = secondary_url or None
                 payload["label_image_url"] = label_url or None
 
-                # Persist and send
+                # Persist result
                 try:
                     store_result(payload, db_cfg)
                 except Exception as e:
-                    print(f"✗ Failed to store result: {e}")
-                print("\n🚀 Sending results to WebSocket...")
-                _send_websocket_result(payload)
-                print("✓ Results sent!\n")
+                    print(f"âœ— Failed to store result: {e}")
+                print("âœ“ Results stored.\n")
                 
             except Exception as e:
-                print(f"\n✗ Error processing capture: {e}")
+                print(f"\nâœ— Error processing capture: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
                 
     except KeyboardInterrupt:
-        print("\n\n🛑 Stopping Bascol Station...")
+        print("\n\nًں›‘ Stopping Bascol Station...")
     except Exception as e:
-        print(f"\n✗ Fatal error in demo: {e}")
+        print(f"\nâœ— Fatal error in demo: {e}")
         import traceback
         traceback.print_exc()
     finally:
         station.stop()
-        print("✓ Station stopped.")
+        print("âœ“ Station stopped.")
 
 
 def run_sangshekan_demo():
@@ -426,7 +387,6 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
                     store_result(payload, db_cfg)
                 except Exception:
                     logger.exception("failed to store payload to DB")
-                _send_websocket_result(payload)
             except Exception as e:
                 logger.exception("error in processing loop: %s", e)
                 time.sleep(1)
@@ -474,7 +434,6 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
                     store_result(payload, db_cfg)
                 except Exception:
                     logger.exception("failed to store payload to DB")
-                _send_websocket_result(payload)
             except Exception as e:
                 logger.exception("error in processing loop: %s", e)
                 time.sleep(1)
