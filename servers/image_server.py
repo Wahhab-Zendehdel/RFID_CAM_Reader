@@ -57,7 +57,7 @@ def main():
     # Create images directory if it doesn't exist
     os.makedirs('images', exist_ok=True)
     
-    host = '127.0.0.1'
+    host = '0.0.0.0'
     port = 3000
     
     server_address = (host, port)

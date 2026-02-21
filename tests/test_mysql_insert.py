@@ -7,7 +7,7 @@ from datetime import datetime
 
 
 def main():
-    cfg = load_config("config/db.json")
+    cfg = load_config()
     db_cfg = cfg.get("db") or {}
     print("Initializing DB (will create table if needed)...")
     init_db(db_cfg)

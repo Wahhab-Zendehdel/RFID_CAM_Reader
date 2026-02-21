@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 
+from lib.common_config import load_env_file
 from .schemas import (
     RecordListResponse,
     RecordOut,
@@ -16,8 +16,8 @@ from .store import RecordStore
 
 
 def _get_store() -> RecordStore:
-    config_path = os.environ.get("DB_CONFIG", "config/db.json")
-    return RecordStore(config_path=config_path)
+    load_env_file()
+    return RecordStore()
 
 
 app = FastAPI(

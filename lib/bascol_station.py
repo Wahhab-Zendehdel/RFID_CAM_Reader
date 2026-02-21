@@ -46,11 +46,11 @@ class BascolStation:
         secondary_cam,
         rfid_host: str,
         rfid_port: Optional[int] = None,
-        config_path: str = "config.json",
+        config_path: Optional[str] = None,
         validate_against_db: bool = False,
         **overrides,
     ) -> None:
-        self._config_path = config_path
+        self._config_path = str(config_path or "")
         self._base_dir = get_base_dir(config_path)
         self._cfg = load_config(config_path, overrides)
 

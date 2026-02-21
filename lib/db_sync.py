@@ -13,6 +13,7 @@ from datetime import datetime
 
 
 from .common_db import _parse_mysql_connection_string, _ensure_sqlite_table
+from .common_config import load_config, load_env_file
 
 
 def _get_sqlite_conn(path: str):
@@ -137,15 +138,13 @@ def sync_once(db_cfg: Dict[str, Any]) -> None:
 
 if __name__ == "__main__":
     import argparse
-    import json
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--interval", type=int, default=0, help="poll interval seconds; 0 = once")
-    parser.add_argument("--config", type=str, default="config/db.json")
     args = parser.parse_args()
 
-    with open(args.config, "r") as fh:
-        cfg = json.load(fh).get("db") or {}
+    load_env_file()
+    cfg = load_config().get("db") or {}
 
     if args.once or args.interval <= 0:
         sync_once(cfg)

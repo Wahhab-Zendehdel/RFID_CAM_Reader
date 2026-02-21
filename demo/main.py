@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.bascol_station import BascolStation
 from lib.sangshekan_station import SangShekanStation
-from lib.common_config import load_config
+from lib.common_config import load_config, load_env_file, load_stations
 from lib.common_db import init_db, store_result
 import multiprocessing
 from typing import Any, Dict, Optional
@@ -21,6 +21,14 @@ import json
 import cv2
 import time
 from datetime import datetime
+
+
+load_env_file()
+
+
+def _load_db_cfg() -> Dict[str, Any]:
+    cfg = load_config()
+    return cfg.get("db") or {}
 
 
 def _save_image_to_file(image, image_type: str, tag: str) -> str:
@@ -157,8 +165,7 @@ def run_bascol_demo():
     Runs indefinitely until stopped.
     """
     # Load DB config and initialize (will verify MySQL connectivity or create sqlite table)
-    cfg = load_config("config/db.json")
-    db_cfg = cfg.get("db") or {}
+    db_cfg = _load_db_cfg()
     try:
         init_db(db_cfg)
     except Exception as e:
@@ -363,8 +370,7 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
     # Ensure DB exists for this process
     # Load DB config for this worker and initialize
     try:
-        cfg = load_config(os.environ.get("DB_CONFIG", "config/db.json"))
-        db_cfg = cfg.get("db") or {}
+        db_cfg = _load_db_cfg()
         init_db(db_cfg)
     except Exception:
         logger.exception("failed to initialize DB")
@@ -413,8 +419,7 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
     # Ensure DB exists for this process
     # Load DB config for this worker and initialize
     try:
-        cfg = load_config(os.environ.get("DB_CONFIG", "config/db.json"))
-        db_cfg = cfg.get("db") or {}
+        db_cfg = _load_db_cfg()
         init_db(db_cfg)
     except Exception:
         logger.exception("failed to initialize DB")
@@ -445,25 +450,9 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
         logger.info("stopped")
 
 
-def _load_stations(path: str = "config/stations.json"):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, list):
-                raise ValueError("stations.json must contain a list of station configs")
-            return data
-    except FileNotFoundError:
-        print(f"Stations file not found at {path}")
-        return []
-    except Exception as e:
-        print(f"Failed to load stations file: {e}")
-        return []
-
-
 if __name__ == "__main__":
     # Multiprocess one process per configured station
-    stations_file = os.environ.get("STATIONS_FILE", "config/stations.json")
-    stations = _load_stations(stations_file)
+    stations = load_stations()
 
     procs: list[multiprocessing.Process] = []
 

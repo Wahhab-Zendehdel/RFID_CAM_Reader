@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from lib.common_config import load_config
+from lib.common_config import load_config, load_env_file
 from lib.common_db import _ensure_sqlite_table
 
 
@@ -34,15 +34,16 @@ def _loads_or_default(raw: Optional[str], default: Any) -> Any:
         return default
 
 
-def _resolve_db_path(config_path: str) -> str:
-    cfg = load_config(config_path)
+def _resolve_db_path() -> str:
+    load_env_file()
+    cfg = load_config()
     db_cfg = cfg.get("db") or {}
     return str(db_cfg.get("path") or "data/app.db")
 
 
 class RecordStore:
-    def __init__(self, config_path: str = "config/db.json"):
-        self.db_path = _resolve_db_path(config_path)
+    def __init__(self):
+        self.db_path = _resolve_db_path()
         _ensure_sqlite_table(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:

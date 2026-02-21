@@ -4,3 +4,6 @@ images/
 logs/
 trocr-large-printed/
 __pycache__/
+.env
+.env.local
+.env.docker

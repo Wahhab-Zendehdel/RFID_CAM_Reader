@@ -23,7 +23,7 @@ class SangShekanStation:
         self,
         rfid_host: str,
         rfid_port: Optional[int] = None,
-        config_path: str = "config.json",
+        config_path: Optional[str] = None,
         **overrides,
     ) -> None:
         self._cfg = load_config(config_path, overrides)
