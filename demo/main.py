@@ -16,6 +16,7 @@ import sqlite3
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
+import threading
 
 import json
 import cv2
@@ -78,6 +79,81 @@ def _coerce_int(value) -> Optional[int]:
         return int(value)
     except Exception:
         return None
+
+
+def _coerce_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _resolve_station_session_timeout_seconds(conf: Dict[str, Any], runtime_cfg: Optional[Dict[str, Any]] = None) -> float:
+    station_timeout = _coerce_float(conf.get("TAG_SESSION_TIMEOUT_SECONDS"))
+    if station_timeout is None:
+        station_timeout = _coerce_float(conf.get("tag_session_timeout_seconds"))
+    if station_timeout is not None and station_timeout > 0:
+        return station_timeout
+    return _resolve_tag_session_timeout_seconds(runtime_cfg)
+
+
+def _pick_station_camera(
+    cameras: list[Dict[str, Any]],
+    device_index: int,
+) -> Optional[Dict[str, Any]]:
+    if not cameras:
+        return None
+    return cameras[device_index % len(cameras)]
+
+
+def _build_bascol_device_configs(conf: Dict[str, Any]) -> list[Dict[str, Any]]:
+    primary_cameras = [dict(item) for item in (conf.get("primary_cameras") or []) if isinstance(item, dict)]
+    secondary_cameras = [dict(item) for item in (conf.get("secondary_cameras") or []) if isinstance(item, dict)]
+    rfid_devices = [dict(item) for item in (conf.get("rfid_devices") or []) if isinstance(item, dict)]
+
+    devices: list[Dict[str, Any]] = []
+    for idx, rfid in enumerate(rfid_devices):
+        rfid_host = str(rfid.get("host") or "").strip()
+        if not rfid_host:
+            continue
+
+        selected_primary = _pick_station_camera(primary_cameras, idx)
+        selected_secondary = _pick_station_camera(secondary_cameras, idx)
+
+        devices.append(
+            {
+                "index": idx,
+                "rfid": rfid,
+                "primary_camera": selected_primary,
+                "secondary_camera": selected_secondary,
+                "rfid_device_id": _coerce_int(rfid.get("id")),
+                "primary_cam_id": _coerce_int((selected_primary or {}).get("id")),
+                "secondary_cam_id": _coerce_int((selected_secondary or {}).get("id")),
+            }
+        )
+    return devices
+
+
+def _build_sangshekan_rfid_configs(conf: Dict[str, Any]) -> list[Dict[str, Any]]:
+    rfid_devices = [dict(item) for item in (conf.get("rfid_devices") or []) if isinstance(item, dict)]
+    devices: list[Dict[str, Any]] = []
+    for idx, rfid in enumerate(rfid_devices):
+        host = str(rfid.get("host") or "").strip()
+        if not host:
+            continue
+        devices.append(
+            {
+                "index": idx,
+                "rfid_device_id": _coerce_int(rfid.get("id")),
+                "host": host,
+                "port": _coerce_int(rfid.get("port")),
+            }
+        )
+    return devices
 
 
 
@@ -443,56 +519,113 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
     name = conf.get("name") or "bascol"
     station_id = _coerce_int(conf.get("id"))
     station_type = conf.get("type") or "bascol"
-    rfid_device_id = _coerce_int(conf.get("rfid_device_id"))
-    primary_cam_id = _coerce_int(conf.get("primary_cam_id"))
-    secondary_cam_id = _coerce_int(conf.get("secondary_cam_id"))
     logger = _setup_logger(name)
     runtime_cfg = load_config()
-    session_timeout_seconds = _resolve_tag_session_timeout_seconds(runtime_cfg)
+    session_timeout_seconds = _resolve_station_session_timeout_seconds(conf, runtime_cfg)
     tag_sessions: Dict[str, Dict[str, Any]] = {}
-    logger.info("starting bascol worker")
-    station = BascolStation(
-        primary_cam=conf.get("primary_cam"),
-        secondary_cam=conf.get("secondary_cam"),
-        rfid_host=conf.get("rfid_host"),
-        rfid_port=conf.get("rfid_port"),
-        timing={"tag_cooldown_seconds": 0.0},
-    )
-    station.start()
-    # Ensure DB exists for this process
-    # Load DB config for this worker and initialize
+    session_lock = threading.Lock()
+    stop_event = threading.Event()
+    logger.info("starting bascol worker session_timeout_seconds=%s", session_timeout_seconds)
+
+    device_confs = _build_bascol_device_configs(conf)
+    if not device_confs:
+        logger.error("no RFID devices configured for bascol station")
+        return
+
     db_cfg: Dict[str, Any] = {}
     try:
         db_cfg = _load_db_cfg()
         init_db(db_cfg)
     except Exception:
         logger.exception("failed to initialize DB")
+
+    def _device_loop(device_conf: Dict[str, Any]) -> None:
+        rfid_cfg = dict(device_conf.get("rfid") or {})
+        rfid_host = str(rfid_cfg.get("host") or "").strip()
+        rfid_port = _coerce_int(rfid_cfg.get("port"))
+        rfid_device_id = _coerce_int(device_conf.get("rfid_device_id"))
+        primary_cam_id = _coerce_int(device_conf.get("primary_cam_id"))
+        secondary_cam_id = _coerce_int(device_conf.get("secondary_cam_id"))
+        device_index = _coerce_int(device_conf.get("index"))
+
+        # Disable camera stream explicitly when a camera is not configured.
+        primary_cam = dict(device_conf.get("primary_camera") or {"host": "", "rtsp_url": "", "index": None})
+        secondary_cam = dict(device_conf.get("secondary_camera") or {"host": "", "rtsp_url": "", "index": None})
+
+        station = BascolStation(
+            primary_cam=primary_cam,
+            secondary_cam=secondary_cam,
+            rfid_host=rfid_host,
+            rfid_port=rfid_port,
+            timing={"tag_cooldown_seconds": 0.0},
+        )
+        station.start()
+        logger.info(
+            "device started index=%s rfid_device_id=%s primary_cam_id=%s secondary_cam_id=%s",
+            device_index,
+            rfid_device_id,
+            primary_cam_id,
+            secondary_cam_id,
+        )
+        try:
+            while not stop_event.is_set():
+                try:
+                    result = station.process_next(timeout_sec=1.0)
+                except Exception:
+                    logger.exception("device loop process_next failed index=%s rfid_device_id=%s", device_index, rfid_device_id)
+                    time.sleep(1)
+                    continue
+
+                tag = str(getattr(result, "tag", "") or "").strip()
+                if not tag:
+                    continue
+
+                logger.info(
+                    "got result: tag=%s success=%s tags=%s rfid_device_id=%s primary_cam_id=%s secondary_cam_id=%s",
+                    tag,
+                    bool(result.success),
+                    result.tags,
+                    rfid_device_id,
+                    primary_cam_id,
+                    secondary_cam_id,
+                )
+                with session_lock:
+                    _persist_bascol_result_with_tag_session(
+                        result=result,
+                        station_name=name,
+                        db_cfg=db_cfg,
+                        tag_sessions=tag_sessions,
+                        session_timeout_seconds=session_timeout_seconds,
+                        logger=logger,
+                        station_id=station_id,
+                        station_type=station_type,
+                        rfid_device_id=rfid_device_id,
+                        primary_cam_id=primary_cam_id,
+                        secondary_cam_id=secondary_cam_id,
+                    )
+        finally:
+            station.stop()
+            logger.info("device stopped index=%s rfid_device_id=%s", device_index, rfid_device_id)
+
+    threads: list[threading.Thread] = []
+    for device_conf in device_confs:
+        thread = threading.Thread(target=_device_loop, args=(device_conf,), daemon=True)
+        thread.start()
+        threads.append(thread)
+
     try:
         while True:
-            try:
-                result = station.process_next(timeout_sec=None)
-                logger.info("got result: success=%s tags=%s", result.success, result.tags)
-                _persist_bascol_result_with_tag_session(
-                    result=result,
-                    station_name=name,
-                    db_cfg=db_cfg,
-                    tag_sessions=tag_sessions,
-                    session_timeout_seconds=session_timeout_seconds,
-                    logger=logger,
-                    station_id=station_id,
-                    station_type=station_type,
-                    rfid_device_id=rfid_device_id,
-                    primary_cam_id=primary_cam_id,
-                    secondary_cam_id=secondary_cam_id,
-                )
-            except Exception as e:
-                logger.exception("error in processing loop: %s", e)
-                time.sleep(1)
-                continue
+            active_count = sum(1 for t in threads if t.is_alive())
+            if active_count == 0:
+                logger.error("all bascol device threads stopped")
+                break
+            time.sleep(1)
     except KeyboardInterrupt:
         logger.info("received KeyboardInterrupt, stopping")
     finally:
-        station.stop()
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=3)
         logger.info("stopped")
 
 
@@ -500,27 +633,48 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
     name = conf.get("name") or "sangshekan"
     station_id = _coerce_int(conf.get("id"))
     station_type = conf.get("type") or "sangshekan"
-    rfid_device_id = _coerce_int(conf.get("rfid_device_id"))
     logger = _setup_logger(name)
     logger.info("starting sangshekan worker")
-    station = SangShekanStation(
-        rfid_host=conf.get("rfid_host"),
-        rfid_port=conf.get("rfid_port"),
-    )
-    station.start()
-    # Ensure DB exists for this process
-    # Load DB config for this worker and initialize
+    stop_event = threading.Event()
+    device_confs = _build_sangshekan_rfid_configs(conf)
+    if not device_confs:
+        logger.error("no RFID devices configured for sangshekan station")
+        return
+
     db_cfg: Dict[str, Any] = {}
     try:
         db_cfg = _load_db_cfg()
         init_db(db_cfg)
     except Exception:
         logger.exception("failed to initialize DB")
-    try:
-        while True:
-            try:
-                event = station.read_next_tag(timeout_sec=None)
-                logger.info("got tag event: tag=%s success=%s", event.tag, event.success)
+
+    def _device_loop(device_conf: Dict[str, Any]) -> None:
+        rfid_device_id = _coerce_int(device_conf.get("rfid_device_id"))
+        device_index = _coerce_int(device_conf.get("index"))
+        station = SangShekanStation(
+            rfid_host=device_conf.get("host"),
+            rfid_port=device_conf.get("port"),
+        )
+        station.start()
+        logger.info("device started index=%s rfid_device_id=%s", device_index, rfid_device_id)
+        try:
+            while not stop_event.is_set():
+                try:
+                    event = station.read_next_tag(timeout_sec=1.0)
+                except Exception:
+                    logger.exception("device loop read_next_tag failed index=%s rfid_device_id=%s", device_index, rfid_device_id)
+                    time.sleep(1)
+                    continue
+
+                if not getattr(event, "success", False) or not str(getattr(event, "tag", "") or "").strip():
+                    continue
+
+                logger.info(
+                    "got tag event: tag=%s success=%s rfid_device_id=%s",
+                    event.tag,
+                    event.success,
+                    rfid_device_id,
+                )
                 payload = _build_sangshekan_payload(
                     event,
                     name,
@@ -532,14 +686,29 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
                     store_result(payload, db_cfg)
                 except Exception:
                     logger.exception("failed to store payload to DB")
-            except Exception as e:
-                logger.exception("error in processing loop: %s", e)
-                time.sleep(1)
-                continue
+        finally:
+            station.stop()
+            logger.info("device stopped index=%s rfid_device_id=%s", device_index, rfid_device_id)
+
+    threads: list[threading.Thread] = []
+    for device_conf in device_confs:
+        thread = threading.Thread(target=_device_loop, args=(device_conf,), daemon=True)
+        thread.start()
+        threads.append(thread)
+
+    try:
+        while True:
+            active_count = sum(1 for t in threads if t.is_alive())
+            if active_count == 0:
+                logger.error("all sangshekan device threads stopped")
+                break
+            time.sleep(1)
     except KeyboardInterrupt:
         logger.info("received KeyboardInterrupt, stopping")
     finally:
-        station.stop()
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=3)
         logger.info("stopped")
 
 

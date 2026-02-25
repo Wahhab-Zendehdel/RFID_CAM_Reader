@@ -285,14 +285,201 @@ def build_rtsp_url(camera_cfg: dict) -> str:
     return f"rtsp://{auth}{host}:{port}{path}"
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    value = str(text or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1].strip()
+    return value
+
+
+def _normalize_camera_device(raw: Any, fallback_id: Any = None) -> Optional[dict]:
+    if isinstance(raw, dict):
+        device = dict(raw)
+    elif isinstance(raw, int):
+        device = {"index": raw}
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        device = {"rtsp_url": text} if "://" in text else {"host": text}
+    else:
+        return None
+
+    device_id = _coerce_int(device.get("id"))
+    if device_id is None:
+        device_id = _coerce_int(fallback_id)
+    if device_id is not None:
+        device["id"] = device_id
+
+    host = device.get("host")
+    if isinstance(host, str):
+        device["host"] = host.strip()
+
+    port = _coerce_int(device.get("port"))
+    if port is not None:
+        device["port"] = port
+
+    return device
+
+
+def _normalize_rfid_device(
+    raw: Any,
+    fallback_id: Any = None,
+    fallback_host: Any = None,
+    fallback_port: Any = None,
+) -> Optional[dict]:
+    if isinstance(raw, dict):
+        device = dict(raw)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        device = {"host": text}
+    elif raw is None:
+        device = {}
+    else:
+        return None
+
+    if "host" not in device and fallback_host is not None:
+        device["host"] = fallback_host
+    if "port" not in device and fallback_port is not None:
+        device["port"] = fallback_port
+
+    device_id = _coerce_int(device.get("id"))
+    if device_id is None:
+        device_id = _coerce_int(fallback_id)
+    if device_id is not None:
+        device["id"] = device_id
+
+    host = device.get("host")
+    if isinstance(host, str):
+        device["host"] = host.strip()
+
+    port = _coerce_int(device.get("port"))
+    if port is not None:
+        device["port"] = port
+
+    return device if device.get("host") else None
+
+
+def _as_list(raw: Any) -> list:
+    if isinstance(raw, list):
+        return raw
+    if raw is None:
+        return []
+    return [raw]
+
+
+def _normalize_station_entry(raw_station: Any, global_timeout: Optional[float]) -> Optional[dict]:
+    if not isinstance(raw_station, dict):
+        return None
+
+    station = dict(raw_station)
+
+    station_id = _coerce_int(station.get("id"))
+    if station_id is not None:
+        station["id"] = station_id
+
+    station_type = str(station.get("type") or "").strip().lower()
+    if station_type:
+        station["type"] = station_type
+
+    timeout_raw = station.get("TAG_SESSION_TIMEOUT_SECONDS")
+    if timeout_raw is None:
+        timeout_raw = station.get("tag_session_timeout_seconds")
+    timeout = _coerce_float(timeout_raw)
+    if timeout is None:
+        timeout = global_timeout
+    if timeout is not None and timeout > 0:
+        station["tag_session_timeout_seconds"] = float(timeout)
+        station["TAG_SESSION_TIMEOUT_SECONDS"] = float(timeout)
+
+    primary_cameras: list[dict] = []
+    for item in _as_list(station.get("primary_cameras")):
+        normalized = _normalize_camera_device(item)
+        if normalized:
+            primary_cameras.append(normalized)
+    if not primary_cameras:
+        legacy_primary = _normalize_camera_device(
+            station.get("primary_cam"),
+            fallback_id=station.get("primary_cam_id"),
+        )
+        if legacy_primary:
+            primary_cameras.append(legacy_primary)
+    station["primary_cameras"] = primary_cameras
+
+    secondary_cameras: list[dict] = []
+    for item in _as_list(station.get("secondary_cameras")):
+        normalized = _normalize_camera_device(item)
+        if normalized:
+            secondary_cameras.append(normalized)
+    if not secondary_cameras:
+        legacy_secondary = _normalize_camera_device(
+            station.get("secondary_cam"),
+            fallback_id=station.get("secondary_cam_id"),
+        )
+        if legacy_secondary:
+            secondary_cameras.append(legacy_secondary)
+    station["secondary_cameras"] = secondary_cameras
+
+    rfid_devices: list[dict] = []
+    for item in _as_list(station.get("rfid_devices")):
+        normalized = _normalize_rfid_device(item)
+        if normalized:
+            rfid_devices.append(normalized)
+    if not rfid_devices:
+        legacy_rfid = _normalize_rfid_device(
+            {},
+            fallback_id=station.get("rfid_device_id"),
+            fallback_host=station.get("rfid_host"),
+            fallback_port=station.get("rfid_port"),
+        )
+        if legacy_rfid:
+            rfid_devices.append(legacy_rfid)
+    station["rfid_devices"] = rfid_devices
+
+    if not station.get("name"):
+        fallback_type = station.get("type") or "station"
+        fallback_id = station.get("id")
+        station["name"] = f"{fallback_type}_{fallback_id}" if fallback_id is not None else str(fallback_type)
+
+    return station
+
+
 def load_stations() -> list[dict]:
     load_env_file()
-    stations_json = str(os.environ.get("STATIONS_JSON") or "").strip()
+    stations_json = _strip_wrapping_quotes(os.environ.get("STATIONS_JSON") or "")
+    global_timeout = _coerce_float(os.environ.get("TAG_SESSION_TIMEOUT_SECONDS"))
     if stations_json:
         try:
             parsed = json.loads(stations_json)
             if isinstance(parsed, list):
-                return parsed
+                normalized: list[dict] = []
+                for raw_station in parsed:
+                    station = _normalize_station_entry(raw_station, global_timeout)
+                    if station:
+                        normalized.append(station)
+                return normalized
         except Exception:
             pass
     return []
