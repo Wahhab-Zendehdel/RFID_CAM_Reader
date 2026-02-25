@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.bascol_station import BascolStation
 from lib.sangshekan_station import SangShekanStation
 from lib.common_config import load_config, load_env_file, load_stations
-from lib.common_db import init_db, store_result
+from lib.common_db import init_db, store_result, update_result
 import multiprocessing
 from typing import Any, Dict, Optional
 import sqlite3
@@ -166,6 +166,9 @@ def run_bascol_demo():
     """
     # Load DB config and initialize (will verify MySQL connectivity or create sqlite table)
     db_cfg = _load_db_cfg()
+    runtime_cfg = load_config()
+    session_timeout_seconds = _resolve_tag_session_timeout_seconds(runtime_cfg)
+    tag_sessions: Dict[str, Dict[str, Any]] = {}
     try:
         init_db(db_cfg)
     except Exception as e:
@@ -176,6 +179,7 @@ def run_bascol_demo():
         secondary_cam="192.168.1.201",
         rfid_host="192.168.1.2",
         rfid_port=6000,
+        timing={"tag_cooldown_seconds": 0.0},
     )
     station.start()
     print("ًں“چ Bascol Station started. Listening for RFID tags...")
@@ -199,34 +203,14 @@ def run_bascol_demo():
                     print(f"   Errors: {result.errors}")
                 print("=" * 70)
                 
-                # Save images and get URLs
-                primary_url = _save_image_to_file(result.primary_image, "primary", result.tag)
-                secondary_url = _save_image_to_file(result.secondary_image, "secondary", result.tag)
-                label_url = _save_image_to_file(result.label_image, "label", result.tag)
-                
-                if primary_url:
-                    print(f"  ًں“¸ Primary image: {primary_url}")
-                if secondary_url:
-                    print(f"  ًں“¸ Secondary image: {secondary_url}")
-                if label_url:
-                    print(f"  ًں“¸ Label image: {label_url}")
-                
-                # Build normalized payload and store to DB
-                payload = _save_and_build_bascol_payload(
-                    result,
-                    "bascol",
+                _persist_bascol_result_with_tag_session(
+                    result=result,
+                    station_name="bascol",
+                    db_cfg=db_cfg,
+                    tag_sessions=tag_sessions,
+                    session_timeout_seconds=session_timeout_seconds,
                     station_type="bascol",
                 )
-                # ensure image URLs from current capture
-                payload["primary_image_url"] = primary_url or None
-                payload["secondary_image_url"] = secondary_url or None
-                payload["label_image_url"] = label_url or None
-
-                # Persist result
-                try:
-                    store_result(payload, db_cfg)
-                except Exception as e:
-                    print(f"âœ— Failed to store result: {e}")
                 print("âœ“ Results stored.\n")
                 
             except Exception as e:
@@ -291,6 +275,110 @@ def _save_and_build_bascol_payload(
         "errors": result.errors or None,
     }
     return payload
+
+
+def _resolve_tag_session_timeout_seconds(cfg: Optional[Dict[str, Any]] = None) -> float:
+    timing_cfg = ((cfg or {}).get("timing") or {}) if cfg else {}
+    raw_value = timing_cfg.get("tag_session_timeout_seconds")
+    try:
+        timeout_seconds = float(raw_value if raw_value is not None else 10.0)
+    except Exception:
+        timeout_seconds = 10.0
+    return timeout_seconds if timeout_seconds > 0 else 10.0
+
+
+def _cleanup_expired_tag_sessions(tag_sessions: Dict[str, Dict[str, Any]], now_ts: float) -> None:
+    stale_tags = [
+        tag
+        for tag, state in tag_sessions.items()
+        if float(state.get("expires_at") or 0.0) <= now_ts
+    ]
+    for tag in stale_tags:
+        tag_sessions.pop(tag, None)
+
+
+def _persist_bascol_result_with_tag_session(
+    result,
+    station_name: str,
+    db_cfg: Dict[str, Any],
+    tag_sessions: Dict[str, Dict[str, Any]],
+    session_timeout_seconds: float,
+    logger: Optional[logging.Logger] = None,
+    station_id: Optional[int] = None,
+    station_type: Optional[str] = None,
+    rfid_device_id: Optional[int] = None,
+    primary_cam_id: Optional[int] = None,
+    secondary_cam_id: Optional[int] = None,
+) -> None:
+    payload = _save_and_build_bascol_payload(
+        result,
+        station_name,
+        station_id=station_id,
+        station_type=station_type,
+        rfid_device_id=rfid_device_id,
+        primary_cam_id=primary_cam_id,
+        secondary_cam_id=secondary_cam_id,
+    )
+
+    tag = str(result.tag or "").strip()
+    if not tag:
+        store_result(payload, db_cfg)
+        return
+
+    now_ts = float(getattr(result, "finished_ts", None) or time.time())
+    _cleanup_expired_tag_sessions(tag_sessions, now_ts)
+    payload_complete = bool(str(payload.get("number") or "").strip())
+    state = tag_sessions.get(tag)
+    in_active_window = state is not None and now_ts < float(state.get("expires_at") or 0.0)
+
+    if not in_active_window:
+        record_id = store_result(payload, db_cfg)
+        tag_sessions[tag] = {
+            "record_id": record_id,
+            "expires_at": now_ts + session_timeout_seconds,
+            "complete": payload_complete,
+        }
+        if logger is not None:
+            logger.info(
+                "session created tag=%s record_id=%s complete=%s",
+                tag,
+                record_id,
+                payload_complete,
+            )
+        return
+
+    state["expires_at"] = now_ts + session_timeout_seconds
+    record_id = state.get("record_id")
+    has_complete_data = bool(state.get("complete"))
+
+    # Keep a complete row from being overwritten by a later incomplete read.
+    if has_complete_data and not payload_complete:
+        if logger is not None:
+            logger.info("session refreshed tag=%s record_id=%s complete_data_kept=true", tag, record_id)
+        return
+
+    if record_id is None:
+        recovered_id = store_result(payload, db_cfg)
+        state["record_id"] = recovered_id
+        state["complete"] = payload_complete
+        if logger is not None:
+            logger.warning("session missing record_id tag=%s recovered_record_id=%s", tag, recovered_id)
+        return
+
+    updated = update_result(int(record_id), payload, db_cfg)
+    if not updated:
+        if logger is not None:
+            logger.warning("session update failed tag=%s record_id=%s", tag, record_id)
+        return
+
+    state["complete"] = has_complete_data or payload_complete
+    if logger is not None:
+        logger.info(
+            "session updated tag=%s record_id=%s complete=%s",
+            tag,
+            record_id,
+            bool(state["complete"]),
+        )
 
 
 def _setup_logger(station_name: str, logs_dir: str = "logs") -> logging.Logger:
@@ -359,16 +447,21 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
     primary_cam_id = _coerce_int(conf.get("primary_cam_id"))
     secondary_cam_id = _coerce_int(conf.get("secondary_cam_id"))
     logger = _setup_logger(name)
+    runtime_cfg = load_config()
+    session_timeout_seconds = _resolve_tag_session_timeout_seconds(runtime_cfg)
+    tag_sessions: Dict[str, Dict[str, Any]] = {}
     logger.info("starting bascol worker")
     station = BascolStation(
         primary_cam=conf.get("primary_cam"),
         secondary_cam=conf.get("secondary_cam"),
         rfid_host=conf.get("rfid_host"),
         rfid_port=conf.get("rfid_port"),
+        timing={"tag_cooldown_seconds": 0.0},
     )
     station.start()
     # Ensure DB exists for this process
     # Load DB config for this worker and initialize
+    db_cfg: Dict[str, Any] = {}
     try:
         db_cfg = _load_db_cfg()
         init_db(db_cfg)
@@ -379,20 +472,19 @@ def _bascol_worker(conf: Dict[str, Any]) -> None:
             try:
                 result = station.process_next(timeout_sec=None)
                 logger.info("got result: success=%s tags=%s", result.success, result.tags)
-                payload = _save_and_build_bascol_payload(
-                    result,
-                    name,
+                _persist_bascol_result_with_tag_session(
+                    result=result,
+                    station_name=name,
+                    db_cfg=db_cfg,
+                    tag_sessions=tag_sessions,
+                    session_timeout_seconds=session_timeout_seconds,
+                    logger=logger,
                     station_id=station_id,
                     station_type=station_type,
                     rfid_device_id=rfid_device_id,
                     primary_cam_id=primary_cam_id,
                     secondary_cam_id=secondary_cam_id,
                 )
-                # persist
-                try:
-                    store_result(payload, db_cfg)
-                except Exception:
-                    logger.exception("failed to store payload to DB")
             except Exception as e:
                 logger.exception("error in processing loop: %s", e)
                 time.sleep(1)
@@ -418,6 +510,7 @@ def _sangshekan_worker(conf: Dict[str, Any]) -> None:
     station.start()
     # Ensure DB exists for this process
     # Load DB config for this worker and initialize
+    db_cfg: Dict[str, Any] = {}
     try:
         db_cfg = _load_db_cfg()
         init_db(db_cfg)

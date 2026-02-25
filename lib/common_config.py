@@ -62,6 +62,7 @@ DEFAULT_CONFIG = {
     "timing": {
         "tag_cooldown_seconds": 3.0,
         "tag_submit_cooldown_seconds": 300.0,
+        "tag_session_timeout_seconds": 10.0,
     },
     "capture": {
         "retry_interval_seconds": 0.4,
@@ -238,6 +239,13 @@ def load_config(config_path: Optional[str] = None, overrides: Optional[dict] = N
         mysql_cfg["enabled"] = _as_bool(os.environ.get("MYSQL_ENABLED"))
     if os.environ.get("MYSQL_CONNECTION_STRING") is not None:
         mysql_cfg["connection_string"] = str(os.environ.get("MYSQL_CONNECTION_STRING") or "").strip()
+    if os.environ.get("TAG_SESSION_TIMEOUT_SECONDS") is not None:
+        try:
+            cfg.setdefault("timing", {})["tag_session_timeout_seconds"] = float(
+                os.environ.get("TAG_SESSION_TIMEOUT_SECONDS") or 10.0
+            )
+        except Exception:
+            pass
 
     _apply_prefixed_env_overrides(cfg)
 
