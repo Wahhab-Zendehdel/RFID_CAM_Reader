@@ -101,6 +101,48 @@ class CameraReader:
         except Exception:
             pass
 
+    def _source_candidates(self):
+        src = self.source
+        if src is None:
+            return []
+        if not isinstance(src, str):
+            return [src]
+
+        candidates = [src]
+        lower_src = src.lower()
+        if lower_src.startswith("rtsp://"):
+            # Some cameras reject the empty-password "user:@" form but accept "user@".
+            if ":@" in src:
+                candidates.append(src.replace(":@", "@", 1))
+
+            # Optional fallback for open RTSP endpoints that don't require auth.
+            body = src[7:]
+            if "@" in body:
+                _, host_path = body.split("@", 1)
+                candidates.append(f"rtsp://{host_path}")
+
+        deduped = []
+        seen = set()
+        for item in candidates:
+            key = str(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _open_capture(self, source, backend):
+        if backend is None:
+            cap = cv2.VideoCapture(source)
+        else:
+            cap = cv2.VideoCapture(source, backend)
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        self._apply_camera_settings(cap)
+        return cap
+
     def _open_camera(self) -> bool:
         if not self.enabled:
             return False
@@ -109,47 +151,32 @@ class CameraReader:
                 self.capture.release()
         except Exception:
             pass
-        # Try to reduce noisy ffmpeg/libav stderr output while opening the stream.
-        # @contextlib.contextmanager
-        # def _suppress_stderr():
-        #     try:
-        #         devnull = open(os.devnull, "w")
-        #         old_stderr_fd = os.dup(2)
-        #         os.dup2(devnull.fileno(), 2)
-        #         yield
-        #     except Exception:
-        #         yield
-        #     finally:
-        #         try:
-        #             os.dup2(old_stderr_fd, 2)
-        #         except Exception:
-        #             pass
-        #         try:
-        #             devnull.close()
-        #         except Exception:
-        #             pass
+        self.capture = None
 
-        # # Prefer FFmpeg backend when available for RTSP streams; fall back to default.
-        # try:
-        #     with _suppress_stderr():
-        #         try:
-        #             self.capture = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
-        #         except Exception:
-        #             self.capture = cv2.VideoCapture(self.source)
-        # except Exception:
-        #     # final fallback
-        #     try:
-        #         self.capture = cv2.VideoCapture(self.source)
-        #     except Exception:
-        #         self.capture = None
-        self.capture = cv2.VideoCapture(self.source)
-        try:
-            self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
+        for candidate in self._source_candidates():
+            if isinstance(candidate, str) and candidate.lower().startswith("rtsp://"):
+                backends = (cv2.CAP_FFMPEG, None)
+            else:
+                backends = (None,)
 
-        self._apply_camera_settings(self.capture)
-        return bool(self.capture.isOpened())
+            for backend in backends:
+                try:
+                    cap = self._open_capture(candidate, backend)
+                except Exception:
+                    cap = None
+
+                if cap is not None and cap.isOpened():
+                    self.capture = cap
+                    self.source = candidate
+                    return True
+
+                try:
+                    if cap is not None:
+                        cap.release()
+                except Exception:
+                    pass
+
+        return False
 
     def start(self) -> None:
         if self.thread is not None:

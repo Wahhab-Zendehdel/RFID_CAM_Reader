@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 DEFAULT_CONFIG = {
     "auto_fill_missing": False,
@@ -71,12 +72,8 @@ DEFAULT_CONFIG = {
         "require_label_match_for_submit": True,
     },
     "paper_detection": {
-        "mask_path": "Mask.png",
-        "min_area": 3000,
-        "max_area_frac": 0.1,
-        "match_width": 300,
-        "min_tm_score": 1e-12,
-        "color_std_min": 40.0,
+        "model_path": "paper_dataset_aug/runs/detect/train/weights/best.pt",
+        "confidence": 0.5,
     },
     "ocr": {
         "model_id": "./trocr-large-printed",
@@ -272,15 +269,22 @@ def build_rtsp_url(camera_cfg: dict) -> str:
         return ""
 
     port = int((camera_cfg or {}).get("port") or 554)
-    username = str((camera_cfg or {}).get("username") or "").strip()
-    password = str((camera_cfg or {}).get("password") or "").strip()
-    path = str((camera_cfg or {}).get("path") or "").strip()
-    if path and not path.startswith("/"):
-        path = "/" + path
+    username_raw = (camera_cfg or {}).get("username")
+    password_raw = (camera_cfg or {}).get("password")
 
+    username = str(username_raw or "").strip()
     auth = ""
-    if username or password:
-        auth = f"{username}:{password}@"
+    if username:
+        user_enc = quote(username, safe="")
+        if password_raw is None:
+            auth = f"{user_enc}@"
+        else:
+            pass_enc = quote(str(password_raw), safe="")
+            auth = f"{user_enc}:{pass_enc}@"
+
+    path = str((camera_cfg or {}).get("path") or "/").strip()
+    if not path.startswith("/"):
+        path = "/" + path
 
     return f"rtsp://{auth}{host}:{port}{path}"
 
